@@ -1658,11 +1658,35 @@ static void brcmf_pcie_wowl_config(struct device *dev, bool enabled)
 }
 
 
+/* Instrumentation aid, not for upstream. Lets the memdump start somewhere
+ * other than rambase, so a chosen slice of firmware RAM can be read back.
+ *
+ * DO NOT point this outside [rambase, rambase + ramsize). BAR1 is 16 MB and
+ * ioremap() happily maps all of it, but only the TCM aperture is actually
+ * decoded by the chip. A read of an undecoded offset does not return ~0 or
+ * raise a PCIe error that Linux can handle -- on Apple Silicon it raises an
+ * SError and the machine resets instantly, with nothing written to the
+ * journal. Reading the chip ROM at backplane 0x200000 does exactly that:
+ * the ROM is not reachable this way, even though the wlc_module registry's
+ * awdl callbacks (0x304a1c, 0x304748) live there.
+ * The clamp below enforces this; keep it.
+ */
+static uint brcmf_dump_addr;
+module_param_named(dump_addr, brcmf_dump_addr, uint, 0644);
+MODULE_PARM_DESC(dump_addr, "memdump start, must be within firmware RAM (0 = rambase)");
+
+static uint brcmf_dump_len;
+module_param_named(dump_len, brcmf_dump_len, uint, 0644);
+MODULE_PARM_DESC(dump_len, "memdump length in bytes (0 = ramsize - srsize)");
+
 static size_t brcmf_pcie_get_ramsize(struct device *dev)
 {
 	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
 	struct brcmf_pciedev *buspub = bus_if->bus_priv.pcie;
 	struct brcmf_pciedev_info *devinfo = buspub->devinfo;
+
+	if (brcmf_dump_len)
+		return brcmf_dump_len;
 
 	return devinfo->ci->ramsize - devinfo->ci->srsize;
 }
@@ -1673,9 +1697,23 @@ static int brcmf_pcie_get_memdump(struct device *dev, void *data, size_t len)
 	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
 	struct brcmf_pciedev *buspub = bus_if->bus_priv.pcie;
 	struct brcmf_pciedev_info *devinfo = buspub->devinfo;
+	u32 rambase = devinfo->ci->rambase;
+	u32 ramsize = devinfo->ci->ramsize;
+	u32 addr = brcmf_dump_addr ? brcmf_dump_addr : rambase;
 
-	brcmf_dbg(PCIE, "dump at 0x%08X: len=%zu\n", devinfo->ci->rambase, len);
-	brcmf_pcie_copy_dev_tomem(devinfo, devinfo->ci->rambase, data, len);
+	/* Refuse anything outside the TCM aperture: see the comment on
+	 * brcmf_dump_addr. Getting this wrong resets the machine, so fail the
+	 * dump rather than trust the caller.
+	 */
+	if (addr < rambase || addr >= rambase + ramsize ||
+	    len > rambase + ramsize - addr) {
+		brcmf_err(bus_if, "memdump 0x%08X+0x%zx outside RAM [0x%08X,0x%08X)\n",
+			  addr, len, rambase, rambase + ramsize);
+		return -ERANGE;
+	}
+
+	brcmf_dbg(PCIE, "dump at 0x%08X: len=%zu\n", addr, len);
+	brcmf_pcie_copy_dev_tomem(devinfo, addr, data, len);
 	return 0;
 }
 

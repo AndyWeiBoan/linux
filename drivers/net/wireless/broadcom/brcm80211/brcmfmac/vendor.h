@@ -20,10 +20,12 @@ enum brcmf_vndr_cmds {
  *
  * @BRCMF_VNDR_AWDL_OP_CREATE: create the AWDL interface
  * @BRCMF_VNDR_AWDL_OP_DESTROY: remove the AWDL interface
+ * @BRCMF_VNDR_AWDL_OP_FWDUMP: snapshot firmware RAM to a devcoredump
  */
 enum brcmf_vndr_awdl_op {
 	BRCMF_VNDR_AWDL_OP_CREATE,
 	BRCMF_VNDR_AWDL_OP_DESTROY,
+	BRCMF_VNDR_AWDL_OP_FWDUMP,
 };
 
 /**

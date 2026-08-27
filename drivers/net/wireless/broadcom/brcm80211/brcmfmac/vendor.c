@@ -121,6 +121,7 @@ static int brcmf_cfg80211_vndr_cmds_awdl_handler(struct wiphy *wiphy,
 						 struct wireless_dev *wdev,
 						 const void *data, int len)
 {
+	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
 	struct net_device *ndev;
 	struct wireless_dev *awdl_wdev;
 	u32 op;
@@ -150,6 +151,15 @@ static int brcmf_cfg80211_vndr_cmds_awdl_handler(struct wiphy *wiphy,
 		if (!awdl_wdev)
 			return -ENODEV;
 		return brcmf_awdl_del_vif(wiphy, awdl_wdev);
+	case BRCMF_VNDR_AWDL_OP_FWDUMP:
+		/* Snapshot the firmware's own RAM, which is where the iovar
+		 * table and the AWDL handler actually live: the image on disk
+		 * keeps them in a compressed region, so the only way to read
+		 * the code that refuses "awdl" is to read it back after the
+		 * firmware has unpacked itself. Lands in
+		 * /sys/class/devcoredump/devcdN/data.
+		 */
+		return brcmf_debug_create_memdump(cfg->pub->bus_if, NULL, 0);
 	default:
 		return -EINVAL;
 	}
