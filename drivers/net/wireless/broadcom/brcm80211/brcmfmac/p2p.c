@@ -1418,16 +1418,16 @@ int brcmf_p2p_notify_action_frame_rx(struct brcmf_if *ifp,
 	if (ifp->is_awdl) {
 		static DEFINE_RATELIMIT_STATE(awdl_af_rs, HZ, 10);
 
+		/* Events arrive (peer PSF/MIF, 336/884 B) but
+		 * frame[0..] is not 04 09 00 17 f2 -- the payload layout differs
+		 * from brcmf_rx_mgmt_data + body. Dump the raw head of the event
+		 * data to find the frame.
+		 */
 		if (__ratelimit(&awdl_af_rs))
-			pr_info("brcmfmac: awdl af rx from %pM chanspec=0x%04x len=%u cat=%u act=%u oui=%02x%02x%02x type=%u reg=%04x\n",
-				e->addr, ch.chspec, mgmt_frame_len,
-				mgmt_frame_len > 0 ? frame[0] : 0,
-				mgmt_frame_len > 1 ? frame[1] : 0,
-				mgmt_frame_len > 2 ? frame[2] : 0,
-				mgmt_frame_len > 3 ? frame[3] : 0,
-				mgmt_frame_len > 4 ? frame[4] : 0,
-				mgmt_frame_len > 5 ? frame[5] : 0,
-				ifp->vif ? ifp->vif->mgmt_rx_reg : 0);
+			pr_info("brcmfmac: awdl af rx from %pM datalen=%u reg=%04x head=%*phN\n",
+				e->addr, e->datalen,
+				ifp->vif ? ifp->vif->mgmt_rx_reg : 0,
+				(int)min_t(u32, e->datalen, 64), data);
 	}
 	/* Check if wpa_supplicant has registered for this frame */
 	brcmf_dbg(INFO, "ifp->vif->mgmt_rx_reg %04x\n", ifp->vif->mgmt_rx_reg);
