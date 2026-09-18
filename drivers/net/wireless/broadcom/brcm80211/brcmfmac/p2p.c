@@ -1427,7 +1427,7 @@ int brcmf_p2p_notify_action_frame_rx(struct brcmf_if *ifp,
 		 * AWDL body by its signature and forward from there; dump the raw
 		 * head so the real header layout can be written down.
 		 */
-		if (__ratelimit(&awdl_af_rs))
+		if (brcmf_awdl_trace && __ratelimit(&awdl_af_rs))
 			pr_info("brcmfmac: awdl af rx from %pM datalen=%u reg=%04x head=%*phN\n",
 				e->addr, e->datalen,
 				ifp->vif ? ifp->vif->mgmt_rx_reg : 0,

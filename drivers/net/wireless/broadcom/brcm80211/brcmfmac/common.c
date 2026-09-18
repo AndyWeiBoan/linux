@@ -43,6 +43,17 @@ int brcmf_msg_level;
 module_param_named(debug, brcmf_msg_level, int, 0600);
 MODULE_PARM_DESC(debug, "Level of debug output");
 
+/* AWDL instrumentation. The action-frame RX and tx-completion log lines are
+ * per-frame: they are how the AWDL work established what the firmware does
+ * with a submitted frame, and they are the only oracle for a parked data
+ * path. They are also noise in a release build -- a discoverable window
+ * submits 40 frames per interval. Off by default, writable at runtime so a
+ * diagnosis needs no reload.
+ */
+int brcmf_awdl_trace;
+module_param_named(awdl_trace, brcmf_awdl_trace, int, 0644);
+MODULE_PARM_DESC(awdl_trace, "Log AWDL action-frame RX and tx completions");
+
 static int brcmf_p2p_enable;
 module_param_named(p2pon, brcmf_p2p_enable, int, 0);
 MODULE_PARM_DESC(p2pon, "Enable legacy p2p management functionality");
