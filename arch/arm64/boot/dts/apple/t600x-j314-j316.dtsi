@@ -238,6 +238,17 @@
 	mux-controls = <&atcphy1_xbar 1>;
 	mux-control-names = "dp-xbar";
 	mux-index = <1>;
+
+	/*
+	 * Which DP transmitter the DCP firmware should drive. The crossbar
+	 * routes that DPTX output to DP IN0; without this it defaults to 0
+	 * and the DCP would drive atcphy0's transmitter instead.
+	 *
+	 * Deliberately no "phys" property: that would make dcp_platform_probe()
+	 * take the dcp->phy path and force the Type-C PHY to DP-only, which
+	 * tears down the Thunderbolt link we are trying to tunnel over.
+	 */
+	apple,dptx-phy = <1>;
 };
 
 &atcphy1_xbar {
