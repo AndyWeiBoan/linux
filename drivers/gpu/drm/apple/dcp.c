@@ -339,7 +339,12 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
 
 	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
 
-	needs_modeset = drm_atomic_crtc_needs_modeset(crtc_state) || !dcp->valid_mode;
+	if (!dcp->valid_mode) {
+		dev_info(dcp->dev, "forcing modeset: no valid output mode\n");
+		crtc_state->mode_changed = true;
+	}
+
+	needs_modeset = drm_atomic_crtc_needs_modeset(crtc_state);
 	if (!needs_modeset && !dcp->connector->connected) {
 		dev_err(dcp->dev, "crtc_atomic_check: disconnected but no modeset\n");
 		return -EINVAL;

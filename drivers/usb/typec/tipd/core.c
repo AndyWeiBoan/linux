@@ -546,6 +546,9 @@ static void tps6598x_handle_plug_event(struct tps6598x *tps, u32 status)
 static void cd321x_typec_update_mode(struct tps6598x *tps, struct cd321x_status *st)
 {
 	struct cd321x *cd321x = container_of(tps, struct cd321x, tps);
+	int ret;
+
+	dev_info(tps->dev, "Type-C data status: %#x\n", st->data_status);
 
 	if (!(st->data_status & TPS_DATA_STATUS_DATA_CONNECTION)) {
 		if (cd321x->state.mode == TYPEC_STATE_SAFE)
@@ -584,6 +587,7 @@ static void cd321x_typec_update_mode(struct tps6598x *tps, struct cd321x_status 
 
 		if (cd321x->state.alt == cd321x->port_altmode_dp &&
 		   cd321x->state.mode == mode) {
+			dev_info(tps->dev, "DP mux already in mode %lu\n", mode);
 			return;
 		}
 
@@ -592,7 +596,8 @@ static void cd321x_typec_update_mode(struct tps6598x *tps, struct cd321x_status 
 		cd321x->state.alt = cd321x->port_altmode_dp;
 		cd321x->state.data = &dp_data;
 		cd321x->state.mode = mode;
-		typec_mux_set(cd321x->mux, &cd321x->state);
+		ret = typec_mux_set(cd321x->mux, &cd321x->state);
+		dev_info(tps->dev, "DP mux request: mode %lu, result %d\n", mode, ret);
 	} else if (st->data_status & TPS_DATA_STATUS_TBT_CONNECTION) {
 		struct typec_thunderbolt_data tbt_data;
 
