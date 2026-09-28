@@ -24,9 +24,14 @@
 		bluetooth0 = &bluetooth0;
 		dcp = &dcp;
 		dcpext0 = &dcpext0;
-#ifdef ENABLE_DCPEXT_TYPEC
+		/*
+		 * m1n1 looks the DCPs up by alias (dcpext_aliases[] in its
+		 * kboot.c) to fill in apple,firmware-version and
+		 * apple,firmware-compat. Without the alias dcpext1 probes with
+		 * "Could not read 'apple,firmware-compat': -22". Needed
+		 * unconditionally here, not only under ENABLE_DCPEXT_TYPEC.
+		 */
 		dcpext1 = &dcpext1;
-#endif
 		disp0 = &display;
 		disp0_piodma = &disp0_piodma;
 		serial0 = &serial0;
