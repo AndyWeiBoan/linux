@@ -1262,21 +1262,38 @@ static int dcp_platform_probe(struct platform_device *pdev)
 		if (IS_ERR(dcp->dp2hdmi_pwren))
 			return PTR_ERR(dcp->dp2hdmi_pwren);
 
-		ret = of_property_read_u32(dev->of_node, "mux-index", &mux_index);
-		if (!ret) {
-			dcp->xbar = devm_mux_control_get(dev, "dp-xbar");
-			if (IS_ERR(dcp->xbar)) {
-				dev_err(dev, "Failed to get dp-xbar: %ld\n", PTR_ERR(dcp->xbar));
-				return PTR_ERR(dcp->xbar);
-			}
-			ret = mux_control_select(dcp->xbar, mux_index);
-			if (ret)
-				dev_warn(dev, "mux_control_select failed: %d\n", ret);
+	}
 
-			/*
-			 * Switch atcphy to DP-only. should move to a Macbook Pro
-			 * 14-/16-inch specific DP-to-HDMI drm_bridge.
-			 */
+	/*
+	 * Select which display crossbar output this DCP feeds.
+	 *
+	 * This is deliberately outside the dcp->phy check above: the target
+	 * can also be one of the DP IN adapters of the USB4 host router, in
+	 * which case the signal is tunnelled over Thunderbolt and never
+	 * reaches a Type-C PHY at all. Without a source on DP IN,
+	 * tb_dp_wait_dprx() never sees DP_COMMON_CAP_DPRX_DONE and the
+	 * Thunderbolt stack tears the DP tunnel down again.
+	 */
+	if (!of_property_read_u32(dev->of_node, "mux-index", &mux_index)) {
+		int ret;
+
+		dcp->xbar = devm_mux_control_get(dev, "dp-xbar");
+		if (IS_ERR(dcp->xbar)) {
+			dev_err(dev, "Failed to get dp-xbar: %ld\n", PTR_ERR(dcp->xbar));
+			return PTR_ERR(dcp->xbar);
+		}
+		ret = mux_control_select(dcp->xbar, mux_index);
+		if (ret)
+			dev_warn(dev, "mux_control_select failed: %d\n", ret);
+
+		/*
+		 * Switch atcphy to DP-only. should move to a Macbook Pro
+		 * 14-/16-inch specific DP-to-HDMI drm_bridge.
+		 *
+		 * Only for a DCP that owns a Type-C PHY - forcing DP-only on
+		 * a port carrying a Thunderbolt tunnel would tear it down.
+		 */
+		if (dcp->phy) {
 			dcp->typec_mux = fwnode_typec_mux_get(dev_fwnode(dcp->dev));
 			if (!IS_ERR_OR_NULL(dcp->typec_mux)) {
 				struct typec_altmode alt = {
