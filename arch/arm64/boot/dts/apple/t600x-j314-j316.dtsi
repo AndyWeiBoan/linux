@@ -192,6 +192,58 @@
 	status = "okay";
 };
 
+/*
+ * EXPERIMENT (andywei, 2026-09-28): feed the Thunderbolt host router's
+ * DP IN adapter so a DP tunnel can actually be activated.
+ *
+ * Without a display controller driving DP IN, tb_dp_wait_dprx() never sees
+ * DP_COMMON_CAP_DPRX_DONE and the tunnel is torn down:
+ *
+ *   thunderbolt-apple-nhi b01f00000.nhi: 0:5 <-> 1:10 (DP): not active, tearing down
+ *
+ * Route dcpext1 through atcphy1's crossbar to MUX_DPIN0 (mux control 1).
+ * This mirrors what macOS does, as captured under the m1n1 hypervisor:
+ *
+ *   CROSSBAR_DISPEXT_EN (0x50) = 0x1
+ *   CROSSBAR_MUX_CTRL   (0x60) = 0x0    -> DPIN0_SELECT = source 0
+ *   CROSSBAR_ATC_EN     (0x70) = 0x1    -> ATC_DPIN0
+ *
+ * atcphy1 is the port the Studio Display was attached to (b01ac0000.cio).
+ * Static for now; a real implementation has to switch the crossbar
+ * dynamically depending on which port the tunnelled display shows up on.
+ */
+&dispext1_dart {
+	status = "okay";
+};
+
+&dcpext1_dart {
+	status = "okay";
+};
+
+&dcpext1_mbox {
+	status = "okay";
+};
+
+&dcpext1 {
+	status = "okay";
+
+	apple,connector-type = "DP";
+
+	/*
+	 * mux control 1 = MUX_DPIN0 (drivers/mux/apple-display-crossbar.c).
+	 * mux-index is the dispext source; dcpext1 uses dispext1, so 1.
+	 * If this turns out to be wrong, 0 is the other candidate - macOS used
+	 * source 0 on the (2-source) t8103 crossbar.
+	 */
+	mux-controls = <&atcphy1_xbar 1>;
+	mux-control-names = "dp-xbar";
+	mux-index = <1>;
+};
+
+&atcphy1_xbar {
+	status = "okay";
+};
+
 /* remove once m1n1 enables sio nodes after setup */
 &sio {
 	status = "okay";
