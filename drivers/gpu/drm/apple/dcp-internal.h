@@ -114,6 +114,8 @@ struct apple_dcp_hw_data {
 };
 
 /* TODO: move IOMFB members to its own struct */
+extern int dcp_frequency_override;
+
 struct apple_dcp {
 	struct device *dev;
 	struct platform_device *piodma;
@@ -219,6 +221,10 @@ struct apple_dcp {
 
 	/* Workqueue for sending vblank events when a dcp swap is not possible */
 	struct work_struct vblank_wq;
+
+	/* retries dcp_dptx_connect() when dptx_autoconnect is set */
+	struct delayed_work autoconnect_wq;
+	int autoconnect_tries;
 
 	/* List of referenced drm_framebuffers which can be unreferenced
 	 * on the next successfully completed swap.

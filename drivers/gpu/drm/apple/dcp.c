@@ -362,11 +362,39 @@ int dcp_get_connector_type(struct platform_device *pdev)
 
 #define DPTX_CONNECT_TIMEOUT msecs_to_jiffies(2000)
 
+/*
+ * Experiment knobs for bringing up a display behind a Thunderbolt DP tunnel.
+ * The DPTX "remote port" target is core[3:0]|atc[7:4]|die[11:8]; the values
+ * that work for DP alt mode are not known to be right for a tunnel. -1 keeps
+ * the value derived from the device tree.
+ */
+/*
+ * The DCP firmware asks the AP for the display clock rate and refuses to set
+ * up pixel clocks when it gets something lower than the mode needs:
+ *
+ *   IOMFB updateFrequencies EDT ERROR: getClockFrequency(0) (0) < videoClock
+ *   67500000! Giving up on frequencies.
+ *
+ * clk_get_rate() comes from the "clocks" phandle, and every clk_dispext* node
+ * in the Asahi device tree carries clock-frequency = <0> (clk_disp0, used by
+ * the internal panel, carries the real 237333328). Override it here so the
+ * value can be probed without rebuilding the device tree.
+ */
+int dcp_frequency_override = -1;
+module_param(dcp_frequency_override, int, 0644);
+
+static int dptx_core_override = -1;
+module_param(dptx_core_override, int, 0644);
+static int dptx_atc_override = -1;
+module_param(dptx_atc_override, int, 0644);
+static int dptx_die_override = -1;
+module_param(dptx_die_override, int, 0644);
+
 static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 {
 	int ret = 0;
 
-	if (!dcp->phy) {
+	if (!dcp->phy && !dcp->xbar) {
 		dev_warn(dcp->dev, "dcp_dptx_connect: missing phy\n");
 		return -ENODEV;
 	}
@@ -382,13 +410,91 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	if (dcp->dptxport[port].connected)
 		goto out_unlock;
 
+	/*
+	 * Re-apply the crossbar routing here, not just at probe.
+	 *
+	 * For a display behind a Thunderbolt DP tunnel the Type-C PHY is
+	 * switched to Thunderbolt mode long after this driver probes, and that
+	 * switch clears the crossbar: macOS traces show every clock and enable
+	 * back at its reset value right before it programs the crossbar again.
+	 * So whatever probe wrote is gone by the time the display shows up.
+	 * macOS programs the crossbar after the PHY switch; do the same.
+	 *
+	 * Only for the tunnelled case (no Type-C PHY of our own); a DCP that
+	 * owns its PHY drives the crossbar output directly and is unaffected.
+	 */
+	if (dcp->xbar && !dcp->phy) {
+		u32 state;
+
+		if (!of_property_read_u32(dcp->dev->of_node, "mux-index", &state)) {
+			int xret;
+
+			mux_control_deselect(dcp->xbar);
+			xret = mux_control_select(dcp->xbar, state);
+			if (xret)
+				dev_warn(dcp->dev,
+					 "failed to re-select crossbar state %u: %d\n",
+					 state, xret);
+		}
+	}
+
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
 	dcp->dptxport[port].atcphy = dcp->phy;
-	dptxport_connect(dcp->dptxport[port].service, 0, dcp->dptx_phy, dcp->dptx_die);
+	{
+		/*
+		 * The DPTX "remote port" target selects a core as well as a
+		 * PHY. A DCP that owns a Type-C PHY drives core 0; a display
+		 * reached over a Thunderbolt DP tunnel needs core 1, and with
+		 * core 0 the DPTX firmware finds no sink and gives up with
+		 * DEVICE_NOT_RESPONDING. Measured on j314s with a Studio
+		 * Display: core 1 is the only value that gets the firmware
+		 * past activate into link training.
+		 */
+		u8 core = dptx_core_override >= 0 ? dptx_core_override :
+			  (!dcp->phy && dcp->xbar) ? 1 : 0;
+		u8 atc = dptx_atc_override >= 0 ? dptx_atc_override : dcp->dptx_phy;
+		u8 die = dptx_die_override >= 0 ? dptx_die_override : dcp->dptx_die;
+
+		/*
+		 * macOS validates the connection before opening it, and the
+		 * driver has never done so. Captured order on a Studio Display
+		 * over a Thunderbolt tunnel:
+		 *     validateConnection(target=0x8011, unk1=0x101)
+		 *     connectTo(target=0x8011, unk1=0xa0101)
+		 *     setPowerState
+		 */
+		if (!dcp->phy && dcp->xbar) {
+			int vret = dptxport_validate_connection(
+				dcp->dptxport[port].service, core, atc, die);
+			if (vret)
+				dev_warn(dcp->dev,
+					 "validate_connection failed: %d\n", vret);
+		}
+
+		dptxport_connect(dcp->dptxport[port].service, core, atc, die);
+	}
 	dptxport_request_display(dcp->dptxport[port].service);
 	dcp->dptxport[port].connected = true;
 
 	mutex_unlock(&dcp->hpd_mutex);
+
+	/*
+	 * For a tunnelled display the HPD notification is what makes the DCP
+	 * firmware start configuring the link, so it has to go out before we
+	 * wait for the link to come up - not after the wait times out. macOS
+	 * sends it twice, immediately after the firmware's ACTIVATE call and
+	 * before it asks for link rates:
+	 *
+	 *     connectTo / setPowerState / GET_SUPPORTS_HPD /
+	 *     GET_MAX_LANE_COUNT / ACTIVATE /
+	 *     hotPlugDetectChangeOccurred / hotPlugDetectChangeOccurred /
+	 *     SET_TILED_DISPLAY_HINTS / GET_MAX_LINK_RATE / ...
+	 */
+	if (!dcp->phy && dcp->xbar) {
+		dptxport_set_hpd(dcp->dptxport[port].service, true);
+		dptxport_set_hpd(dcp->dptxport[port].service, true);
+	}
+
 	ret = wait_for_completion_timeout(&dcp->dptxport[port].linkcfg_completion,
 				    DPTX_CONNECT_TIMEOUT);
 	if (ret < 0)
@@ -400,7 +506,9 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 
 	usleep_range(5, 10);
 
-	if (dcp->connector_type == DRM_MODE_CONNECTOR_DisplayPort)
+	/* already sent above for the tunnelled case */
+	if (dcp->connector_type == DRM_MODE_CONNECTOR_DisplayPort &&
+	    !(!dcp->phy && dcp->xbar))
 		dptxport_set_hpd(dcp->dptxport[port].service, true);
 
 	if (dcp->avep)
@@ -433,6 +541,116 @@ static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
 	mutex_unlock(&dcp->hpd_mutex);
 
 	return 0;
+}
+
+/*
+ * Manual DPTX connect/disconnect trigger, for displays reached over a
+ * Thunderbolt DP tunnel. Nothing in the Thunderbolt stack emits a DRM
+ * out-of-band hotplug event, so there is no in-kernel path that tells the
+ * DCP to drive the link. Until that plumbing exists, drive it by hand:
+ *
+ *   echo 1 > /sys/devices/platform/soc/28cc00000.dcp/dptx_connect
+ */
+static ssize_t dptx_connect_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	struct apple_dcp *dcp = dev_get_drvdata(dev);
+	char verb[16];
+	unsigned int port = 0, arg = 0;
+	int n, ret = 0;
+
+	n = sscanf(buf, "%15s %u %u", verb, &port, &arg);
+	if (n < 1)
+		return -EINVAL;
+	if (port > 1)
+		return -EINVAL;
+	if (!dcp->dptxport[port].enabled) {
+		dev_warn(dev, "dptx: port %u not enabled\n", port);
+		return -ENODEV;
+	}
+
+	dev_info(dev, "dptx: %s port=%u arg=%u\n", verb, port, arg);
+
+	if (!strcmp(verb, "connect") || !strcmp(verb, "1"))
+		ret = dcp_dptx_connect(dcp, port);
+	else if (!strcmp(verb, "disconnect") || !strcmp(verb, "0"))
+		ret = dcp_dptx_disconnect(dcp, port);
+	else if (!strcmp(verb, "validate"))
+		ret = dptxport_validate_connection(dcp->dptxport[port].service,
+						   dptx_core_override >= 0 ? dptx_core_override : 0,
+						   dptx_atc_override >= 0 ? dptx_atc_override : dcp->dptx_phy,
+						   dptx_die_override >= 0 ? dptx_die_override : dcp->dptx_die);
+	else if (!strcmp(verb, "request"))
+		ret = dptxport_request_display(dcp->dptxport[port].service);
+	else if (!strcmp(verb, "release"))
+		ret = dptxport_release_display(dcp->dptxport[port].service);
+	else if (!strcmp(verb, "hpd"))
+		ret = dptxport_set_hpd(dcp->dptxport[port].service, !!arg);
+	else if (!strcmp(verb, "xbar")) {
+		/*
+		 * Re-apply the crossbar routing now. Probe runs at boot, long
+		 * before the Type-C PHY is switched to Thunderbolt mode and
+		 * ACIO is powered, so the routing set there may not survive.
+		 * "xbar" re-selects the DT state, "xbar <n>" picks dispext n.
+		 */
+		u32 state = arg;
+
+		if (!dcp->xbar)
+			return -ENODEV;
+		if (n < 3 && of_property_read_u32(dev->of_node, "mux-index", &state))
+			return -EINVAL;
+		mux_control_deselect(dcp->xbar);
+		ret = mux_control_select(dcp->xbar, state);
+		dev_info(dev, "dptx: xbar re-select state %u -> %d\n", state, ret);
+	}
+	else
+		return -EINVAL;
+
+	if (ret)
+		dev_warn(dev, "dptx: %s returned %d\n", verb, ret);
+
+	return count;
+}
+static DEVICE_ATTR_WO(dptx_connect);
+
+static struct attribute *dcp_dev_attrs[] = {
+	&dev_attr_dptx_connect.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(dcp_dev);
+
+/*
+ * Nothing in the kernel connects a DCP to a display that arrives over a
+ * Thunderbolt DP tunnel: the Thunderbolt stack never emits
+ * drm_connector_oob_hotplug_event() (only typec/altmodes/displayport.c does),
+ * so dcp_dptx_connect() is only ever reachable from userspace. That makes it
+ * impossible to trace a bring-up from a guest with no userspace, so allow the
+ * driver to drive it itself: retry every second until the DPTX firmware
+ * reports a display.
+ */
+static int dptx_autoconnect;
+module_param(dptx_autoconnect, int, 0644);
+
+static void dcp_autoconnect_work(struct work_struct *work)
+{
+	struct apple_dcp *dcp = container_of(to_delayed_work(work),
+					     struct apple_dcp, autoconnect_wq);
+
+	if (dcp->dptxport[0].connected)
+		return;
+
+	if (dcp->autoconnect_tries++ >= dptx_autoconnect) {
+		dev_info(dcp->dev, "autoconnect: giving up after %d tries\n",
+			 dcp->autoconnect_tries - 1);
+		return;
+	}
+
+	dev_info(dcp->dev, "autoconnect: try %d\n", dcp->autoconnect_tries);
+	dcp_dptx_connect(dcp, 0);
+
+	if (!dcp->dptxport[0].connected)
+		schedule_delayed_work(&dcp->autoconnect_wq, HZ);
 }
 
 int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port)
@@ -524,7 +742,7 @@ int dcp_start(struct platform_device *pdev)
 				 ret);
 	}
 
-	if (dcp->phy && dcp->fw_compat >= DCP_FIRMWARE_V_13_5) {
+	if ((dcp->phy || dcp->xbar) && dcp->fw_compat >= DCP_FIRMWARE_V_13_5) {
 		ret = ibootep_init(dcp);
 		if (ret)
 			dev_warn(dcp->dev, "Failed to start IBOOT endpoint: %d\n",
@@ -558,12 +776,18 @@ int dcp_start(struct platform_device *pdev)
 				dcp_dptx_connect(dcp, 0);
 #endif
 		}
-	} else if (dcp->phy) {
+	} else if (dcp->phy || dcp->xbar) {
 		dev_warn(dcp->dev, "OS firmware incompatible with dptxport EP\n");
 	}
 	ret = iomfb_start_rtkit(dcp);
 	if (ret)
 		dev_err(dcp->dev, "Failed to start IOMFB endpoint: %d\n", ret);
+
+	if (dptx_autoconnect > 0 && !dcp->phy && dcp->xbar) {
+		INIT_DELAYED_WORK(&dcp->autoconnect_wq, dcp_autoconnect_work);
+		dcp->autoconnect_tries = 0;
+		schedule_delayed_work(&dcp->autoconnect_wq, 5 * HZ);
+	}
 
 #if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
 	if (hdmi_audio) {
@@ -1397,6 +1621,7 @@ static struct platform_driver apple_platform_driver = {
 	.driver	= {
 		.name = "apple-dcp",
 		.of_match_table	= of_match,
+		.dev_groups = dcp_dev_groups,
 		.pm = pm_sleep_ptr(&dcp_platform_pm_ops),
 	},
 };

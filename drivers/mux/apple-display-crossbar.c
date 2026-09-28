@@ -83,6 +83,52 @@
 #define ATC_DPIN1 BIT(4)
 #define ATC_DPPHY BIT(8)
 
+/*
+ * macOS writes 0 here on t6000, every time, right before it enables the
+ * crossbar clocks - 10 writes across 6 independent m1n1 hypervisor traces,
+ * never 5. With 5 the FIFO clock status registers (0x800/0x820/0x840) stay
+ * at 0 even with a trained DP link and a mode set, so no pixels reach the
+ * Thunderbolt DP IN adapter and the tunnel reports 0 Mb/s consumed.
+ * -1 keeps the per-SoC value.
+ */
+static int tunable_override = -1;
+module_param(tunable_override, int, 0644);
+
+/*
+ * Touching the DP IN adapters' blocks is off by default and must stay that
+ * way: this driver selects the crossbar at DCP probe time, long before the
+ * Type-C PHY is in Thunderbolt mode and ACIO is powered, and writing those
+ * registers while the block is unpowered takes the machine down with
+ * "Asynchronous SError Interrupt" (see the warning in
+ * drivers/thunderbolt/apple.c about ACIO ordering).
+ *
+ * Turn it on from userspace once a tunnel exists, then re-run the crossbar
+ * selection so the DP IN adapter is armed before the clocks start, which is
+ * the order macOS uses.
+ */
+static bool dpin_program;
+module_param(dpin_program, bool, 0644);
+
+/*
+ * The Thunderbolt DP IN adapters have a small SoC-side block of their own,
+ * next to the crossbar. macOS programs it as part of bringing a tunnelled
+ * display up, in this order (captured under the m1n1 hypervisor):
+ *
+ *   dpin: ENABLE = 3, REG_04 = 1, MODE = 5      <- before the crossbar
+ *   crossbar: MUX_CTRL
+ *   dpin: HOLD = 0
+ *   crossbar: clock and enable bits
+ *
+ * Linux has never had a driver or even a device tree node for it. REG_00 and
+ * REG_04 are hardware status (writes do not stick); ENABLE and HOLD are the
+ * ones that matter.
+ */
+#define DPIN_MODE 0x00		/* ro: 5 armed, 4 streaming */
+#define DPIN_REG_04 0x04	/* ro: 1 armed, 2 streaming */
+#define DPIN_ENABLE 0x08	/* 3 = on, 0 = off */
+#define DPIN_HOLD 0x0c		/* 1 = held, 0 = released */
+#define DPIN_STATUS 0x10	/* follows HOLD */
+
 enum { MUX_DPPHY = 0, MUX_DPIN0 = 1, MUX_DPIN1 = 2, MUX_MAX = 3 };
 static const char *apple_dpxbar_names[MUX_MAX] = { "dpphy", "dpin0", "dpin1" };
 
@@ -95,6 +141,8 @@ struct apple_dpxbar_hw {
 struct apple_dpxbar {
 	struct device *dev;
 	void __iomem *regs;
+	/* optional, indexed by MUX_DPIN0 / MUX_DPIN1 */
+	void __iomem *dpin[MUX_MAX];
 	int selected_dispext[MUX_MAX];
 	spinlock_t lock;
 };
@@ -294,6 +342,11 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 		}
 	}
 
+	if (!enable && dpin_program && dpxbar->dpin[index]) {
+		writel(1, dpxbar->dpin[index] + DPIN_HOLD);
+		writel(0, dpxbar->dpin[index] + DPIN_ENABLE);
+	}
+
 	dpxbar_set32(dpxbar, OUT_N_CLK_EN, atc_bit);
 	dpxbar_clear32(dpxbar, OUT_UNK_EN, atc_bit);
 	dpxbar_clear32(dpxbar, OUT_PCLK1_EN, atc_bit);
@@ -317,6 +370,18 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 	dpxbar_mask32(dpxbar, CROSSBAR_MUX_CTRL, mux_mask, mux_set);
 
 	if (enable) {
+		/*
+		 * Arm the DP IN adapter before the crossbar starts feeding it,
+		 * which is the order macOS uses. Doing it afterwards (by hand
+		 * from userspace) makes no difference.
+		 */
+		if (dpin_program && dpxbar->dpin[index])
+			writel(3, dpxbar->dpin[index] + DPIN_ENABLE);
+
+		/* macOS writes the tunable here, just before the clock enables */
+		writel(tunable_override >= 0 ? (u32)tunable_override : 0,
+		       dpxbar->regs + UNK_TUNABLE);
+
 		dpxbar_clear32(dpxbar, FIFO_WR_N_CLK_EN, dispext_bit);
 		dpxbar_clear32(dpxbar, FIFO_RD_N_CLK_EN, dispext_bit);
 		dpxbar_clear32(dpxbar, OUT_N_CLK_EN, atc_bit);
@@ -339,6 +404,10 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 		dpxbar_clear32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
 		udelay(10);
 		dpxbar_set32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
+
+		/* release the DP IN adapter now that it has a source */
+		if (dpin_program && dpxbar->dpin[index])
+			writel(0, dpxbar->dpin[index] + DPIN_HOLD);
 
 		dpxbar->selected_dispext[index] = state;
 	}
@@ -364,6 +433,62 @@ static const struct mux_control_ops apple_dpxbar_t602x_ops = {
 	.set = apple_dpxbar_set_t602x,
 };
 
+static const struct { u16 off; const char *name; } dpxbar_regs[] = {
+	{ 0x000, "FIFO_WR_DPTX_CLK_EN" }, { 0x004, "FIFO_WR_N_CLK_EN" },
+	{ 0x008, "FIFO_WR_UNK_EN" },      { 0x020, "FIFO_RD_PCLK1_EN" },
+	{ 0x024, "FIFO_RD_PCLK2_EN" },    { 0x028, "FIFO_RD_N_CLK_EN" },
+	{ 0x02c, "FIFO_RD_UNK_EN" },      { 0x040, "OUT_PCLK1_EN" },
+	{ 0x044, "OUT_PCLK2_EN" },        { 0x048, "OUT_N_CLK_EN" },
+	{ 0x04c, "OUT_UNK_EN" },          { 0x050, "CROSSBAR_DISPEXT_EN" },
+	{ 0x060, "CROSSBAR_MUX_CTRL" },   { 0x070, "CROSSBAR_ATC_EN" },
+	{ 0x800, "WR_DPTX_CLK_EN_STAT" }, { 0x804, "WR_N_CLK_EN_STAT" },
+	{ 0x820, "RD_PCLK1_EN_STAT" },    { 0x824, "RD_PCLK2_EN_STAT" },
+	{ 0x828, "RD_N_CLK_EN_STAT" },    { 0x840, "OUT_PCLK1_EN_STAT" },
+	{ 0x844, "OUT_PCLK2_EN_STAT" },   { 0x848, "OUT_N_CLK_EN_STAT" },
+	{ 0xc00, "UNK_TUNABLE" },
+};
+
+static ssize_t regs_show(struct device *dev, struct device_attribute *attr,
+			 char *buf)
+{
+	struct mux_chip *chip = dev_get_drvdata(dev);
+	struct apple_dpxbar *dpxbar = mux_chip_priv(chip);
+	int len = 0;
+
+	for (int i = 0; i < ARRAY_SIZE(dpxbar_regs); i++)
+		len += sysfs_emit_at(buf, len, "0x%03x %-22s = 0x%08x\n",
+				     dpxbar_regs[i].off, dpxbar_regs[i].name,
+				     readl(dpxbar->regs + dpxbar_regs[i].off));
+	for (int i = 0; i < MUX_MAX; i++)
+		len += sysfs_emit_at(buf, len, "sel[%s] = %d\n",
+				     apple_dpxbar_names[i],
+				     dpxbar->selected_dispext[i]);
+
+	/*
+	 * The DP IN blocks are claimed by this driver now, so /dev/mem cannot
+	 * reach them any more - dump them here instead. macOS shows MODE going
+	 * 5 -> 4 and REG_04 going 1 -> 2 once a stream is actually running.
+	 */
+	for (int i = MUX_DPIN0; i <= MUX_DPIN1; i++) {
+		if (!dpxbar->dpin[i])
+			continue;
+		len += sysfs_emit_at(buf, len,
+				     "%s: MODE=0x%x REG_04=0x%x ENABLE=0x%x HOLD=0x%x STATUS=0x%x\n",
+				     apple_dpxbar_names[i],
+				     readl(dpxbar->dpin[i] + DPIN_MODE),
+				     readl(dpxbar->dpin[i] + DPIN_REG_04),
+				     readl(dpxbar->dpin[i] + DPIN_ENABLE),
+				     readl(dpxbar->dpin[i] + DPIN_HOLD),
+				     readl(dpxbar->dpin[i] + DPIN_STATUS));
+	}
+
+	return len;
+}
+static DEVICE_ATTR_RO(regs);
+
+static struct attribute *dpxbar_attrs[] = { &dev_attr_regs.attr, NULL };
+ATTRIBUTE_GROUPS(dpxbar);
+
 static int apple_dpxbar_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -386,9 +511,24 @@ static int apple_dpxbar_probe(struct platform_device *pdev)
 	if (IS_ERR(dpxbar->regs))
 		return PTR_ERR(dpxbar->regs);
 
+	/* optional: the Thunderbolt DP IN adapters' SoC-side blocks */
+	for (unsigned int i = MUX_DPIN0; i <= MUX_DPIN1; i++) {
+		const char *name = i == MUX_DPIN0 ? "dpin0" : "dpin1";
+		void __iomem *p;
+
+		p = devm_platform_ioremap_resource_byname(pdev, name);
+		if (IS_ERR(p)) {
+			dpxbar->dpin[i] = NULL;
+			continue;
+		}
+		dpxbar->dpin[i] = p;
+		dev_info(dev, "%s block available\n", name);
+	}
+
 	if (!of_device_is_compatible(dev->of_node, "apple,t6020-display-crossbar")) {
 		readl(dpxbar->regs + UNK_TUNABLE);
-		writel(hw->tunable, dpxbar->regs + UNK_TUNABLE);
+		writel(tunable_override >= 0 ? (u32)tunable_override : hw->tunable,
+		       dpxbar->regs + UNK_TUNABLE);
 		readl(dpxbar->regs + UNK_TUNABLE);
 	}
 
@@ -397,6 +537,8 @@ static int apple_dpxbar_probe(struct platform_device *pdev)
 		mux_chip->mux[i].idle_state = MUX_IDLE_DISCONNECT;
 		dpxbar->selected_dispext[i] = -1;
 	}
+
+	platform_set_drvdata(pdev, mux_chip);
 
 	ret = devm_mux_chip_register(dev, mux_chip);
 	if (ret < 0)
@@ -419,7 +561,7 @@ static const struct apple_dpxbar_hw apple_dpxbar_hw_t8112 = {
 
 static const struct apple_dpxbar_hw apple_dpxbar_hw_t6000 = {
 	.n_ufp = 9,
-	.tunable = 5,
+	.tunable = 0,		/* macOS writes 0, not 5 - see tunable_override */
 	.ops = &apple_dpxbar_ops,
 };
 
@@ -451,6 +593,7 @@ MODULE_DEVICE_TABLE(of, apple_dpxbar_ids);
 
 static struct platform_driver apple_dpxbar_driver = {
 	.driver = {
+		.dev_groups = dpxbar_groups,
 		.name = "apple-display-crossbar",
 		.of_match_table	= apple_dpxbar_ids,
 	},

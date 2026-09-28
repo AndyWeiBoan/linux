@@ -107,33 +107,29 @@
 
 &dcpext0 {
 	/* enabled by the loader */
-	apple,connector-type = "HDMI-A";
 
-	/*  HDMI HPD gpio, used as interrupt*/
-	hdmi-hpd-gpios = <&pinctrl_nub 15 GPIO_ACTIVE_HIGH>;
+	/*
+	 * TEST: drive the Studio Display over the Thunderbolt DP tunnel from
+	 * dcpext0, mirroring what macOS does. macOS programs crossbar source 0
+	 * (= dispext0) into DP IN0; dcpext1/source 1 behaves identically up to
+	 * the point where the DPTX firmware gives up, so try the exact macOS
+	 * pairing. HDMI is given up for the duration of this test.
+	 *
+	 * Deliberately no "phys": that would make probe force the Type-C PHY to
+	 * DP-only and tear down the Thunderbolt link we tunnel over.
+	 */
+	apple,connector-type = "DP";
 
-	hdmi-pwren-gpios = <&smc_gpio 23 GPIO_ACTIVE_HIGH>;
-	dp2hdmi-pwren-gpios = <&smc_gpio 6 GPIO_ACTIVE_HIGH>;
-
-	phys = <&atcphy3 PHY_TYPE_DP>;
-	phy-names = "dp-phy";
-	mux-controls = <&atcphy3_xbar 0>;
+	/*
+	 * The tunnel's host DP IN adapter "0:5" is the crossbar's dpin0.
+	 * Measured, not assumed: routing to dpin1 instead leaves the link
+	 * untrained (no EDID, no modes at all), and the ACIO firmware arms
+	 * dpin0 (its MODE reads 5) while dpin1 stays all zeroes.
+	 */
+	mux-controls = <&atcphy1_xbar 1>;	/* 1 = MUX_DPIN0 */
 	mux-control-names = "dp-xbar";
-	mux-index = <0>;
-	apple,dptx-phy = <3>;
-
-	ports {
-		#address-cells = <1>;
-		#size-cells = <0>;
-
-		port@1 {
-			reg = <1>;
-
-			decpext0_dpout: endpoint {
-				remote-endpoint = <&atcphy3_dp>;
-			};
-		};
-	};
+	mux-index = <0>;			/* source = dispext0, like macOS */
+	apple,dptx-phy = <1>;
 };
 
 /*
@@ -169,30 +165,14 @@
 };
 
 &dcpext1 {
+	/*
+	 * Tried feeding the display's second DP OUT (1:11) from here via the
+	 * crossbar's DPIN1: the display never offers that adapter
+	 * ("0:6: no suitable DP OUT adapter available"), it is a single-stream
+	 * sink over Thunderbolt, and having a second DCP on the crossbar
+	 * stopped dcpext0 from connecting at all. Left plain.
+	 */
 	status = "okay";
-
-	apple,connector-type = "DP";
-
-	/*
-	 * mux control 1 = MUX_DPIN0 (drivers/mux/apple-display-crossbar.c).
-	 * mux-index is the dispext source; dcpext1 uses dispext1, so 1.
-	 * If this turns out to be wrong, 0 is the other candidate - macOS used
-	 * source 0 on the (2-source) t8103 crossbar.
-	 */
-	mux-controls = <&atcphy1_xbar 1>;
-	mux-control-names = "dp-xbar";
-	mux-index = <1>;
-
-	/*
-	 * Which DP transmitter the DCP firmware should drive. The crossbar
-	 * routes that DPTX output to DP IN0; without this it defaults to 0
-	 * and the DCP would drive atcphy0's transmitter instead.
-	 *
-	 * Deliberately no "phys" property: that would make dcp_platform_probe()
-	 * take the dcp->phy path and force the Type-C PHY to DP-only, which
-	 * tears down the Thunderbolt link we are trying to tunnel over.
-	 */
-	apple,dptx-phy = <1>;
 };
 
 &atcphy1_xbar {
@@ -684,19 +664,7 @@
 	};
 };
 
-&atcphy3 {
-	ports {
-		#address-cells = <1>;
-		#size-cells = <0>;
-
-		port@2 {
-			reg = <2>;
-			atcphy3_dp: endpoint {
-				remote-endpoint = <&decpext0_dpout>;
-			};
-		};
-	};
-};
+/* TEST: atcphy3 DP endpoint removed along with the HDMI config above. */
 
 &aop_mbox {
        status = "okay";

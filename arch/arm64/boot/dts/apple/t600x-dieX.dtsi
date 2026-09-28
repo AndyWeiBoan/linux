@@ -560,6 +560,17 @@
 
 	DIE_NODE(atcphy1_xbar): mux@b0304c000 {
 		compatible = "apple,t6000-display-crossbar";
+		/*
+		 * The two Thunderbolt DP IN adapters have a small SoC-side
+		 * block each, which macOS programs as part of bringing up a
+		 * tunnelled display. Linux had no node for them at all.
+		 *
+		 * Keep them OUT of reg for now: once the driver ioremaps them
+		 * the kernel marks the range busy and /dev/mem can no longer
+		 * write it, which is how the DP IN block actually gets armed
+		 * today (ENABLE=3, HOLD=0 before the DPTX connect). Measured:
+		 * with the ranges present the link never trains at all.
+		 */
 		reg = <0xb 0x0304c000 0x0 0x4000>;
 		#mux-control-cells = <1>;
 		power-domains = <&DIE_NODE(ps_atc1_usb)>;

@@ -1658,7 +1658,11 @@
 
 		atcphy1_xbar: mux@50304c000 {
 			compatible = "apple,t8103-display-crossbar";
-			reg = <0x5 0x0304c000 0x0 0x4000>;
+			/* see the t600x node: the DP IN adapters' own blocks */
+			reg = <0x5 0x0304c000 0x0 0x4000>,
+			      <0x5 0x01e50000 0x0 0x4000>,
+			      <0x5 0x01e58000 0x0 0x4000>;
+			reg-names = "xbar", "dpin0", "dpin1";
 			#mux-control-cells = <1>;
 			power-domains = <&ps_atc1_usb>;
 		};

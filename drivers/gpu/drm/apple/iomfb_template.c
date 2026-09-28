@@ -457,6 +457,9 @@ dcpep_cb_map_physical(struct apple_dcp *dcp, struct dcp_map_physical_req *req)
 
 static u64 dcpep_cb_get_frequency(struct apple_dcp *dcp)
 {
+	if (dcp_frequency_override > 0)
+		return (u64)dcp_frequency_override;
+
 	return clk_get_rate(dcp->clk);
 }
 

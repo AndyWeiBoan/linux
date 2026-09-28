@@ -20,7 +20,60 @@
 	aliases {
 		ethernet0 = &ethernet0;
 		sio = &sio;
+		/*
+		 * m1n1 looks DCPs up by alias (dcpext_aliases[] in its
+		 * src/kboot.c) to fill apple,firmware-version /
+		 * apple,firmware-compat. Without it dcpext probes with
+		 * "Could not read 'apple,firmware-compat': -22".
+		 */
+		dcpext = &dcpext;
 	};
+};
+
+/*
+ * EXPERIMENT (andywei, 2026-09-28): same wiring as t600x-j314-j316.dtsi, so
+ * the Studio Display's bring-up can be traced under the m1n1 hypervisor on
+ * the machine the macOS reference traces were captured on.
+ *
+ * Feed the Thunderbolt host router's DP IN0 adapter from dcpext through
+ * atcphy1's display crossbar. macOS programs exactly this pairing here:
+ *   CROSSBAR_MUX_CTRL (0x60) = 0x0   -> DPIN0 source = dispext0
+ *   CROSSBAR_DISPEXT_EN (0x50) = 0x1
+ *   CROSSBAR_ATC_EN (0x70) = 0x1     -> ATC_DPIN0
+ *
+ * No "phys" on purpose: that path forces the Type-C PHY to DP-only and tears
+ * down the Thunderbolt link the DP is tunnelled over.
+ */
+&display {
+	iommus = <&disp0_dart 0 0x0 0x0 0x0 0xfc000000>,
+		 <&dispext0_dart 0 0x0 0x0 0x0 0xfc000000>;
+};
+
+&dispext0_dart {
+	status = "okay";
+};
+
+&dcpext_dart {
+	status = "okay";
+};
+
+&dcpext_mbox {
+	status = "okay";
+};
+
+&dcpext {
+	status = "okay";
+
+	apple,connector-type = "DP";
+
+	mux-controls = <&atcphy1_xbar 1>;	/* 1 = MUX_DPIN0 */
+	mux-control-names = "dp-xbar";
+	mux-index = <0>;			/* source = dispext0 */
+	apple,dptx-phy = <1>;
+};
+
+&atcphy1_xbar {
+	status = "okay";
 };
 
 &dcp {

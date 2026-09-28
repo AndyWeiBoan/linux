@@ -5,6 +5,7 @@
 #include <linux/completion.h>
 #include <linux/phy/phy.h>
 #include <linux/delay.h>
+#include <linux/moduleparam.h>
 
 #include "afk.h"
 #include "dcp.h"
@@ -82,8 +83,9 @@ int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 
 	trace_dptxport_validate_connection(dptx, core, atc, die);
 
+	/* macOS sends 0x101 here, not 0x100 */
 	cmd.target = cpu_to_le32(target);
-	cmd.unk = cpu_to_le32(0x100);
+	cmd.unk = cpu_to_le32(0x101);
 	ret = afk_service_call(service, 0, 12, &cmd, sizeof(cmd), 40, &resp,
 			       sizeof(resp), 40);
 	if (ret)
@@ -91,18 +93,40 @@ int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 
 	if (le32_to_cpu(resp.target) != target)
 		return -EINVAL;
-	if (le32_to_cpu(resp.unk) != 0x100)
+	if (le32_to_cpu(resp.unk) != 0x101)
 		return -EINVAL;
 
 	return 0;
 }
+
+static int dptx_unk_override = -1;
+module_param(dptx_unk_override, int, 0644);
+
+/*
+ * Clamp the link rate the DCP firmware asks for. A Studio Display over a
+ * Thunderbolt tunnel trains at HBR2 here while the display side's DP OUT
+ * adapter reports HBR3 and never sets DPRX_DONE - and the known Linux fix
+ * for this display on other GPUs is to force HBR3 ("HBR2 + DSC = flicker /
+ * black screen"). 0 keeps whatever the firmware picked.
+ * Values: RBR 0x06, HBR 0x0a, HBR2 0x14, HBR3 0x1e.
+ */
+static int dptx_force_link_rate;
+module_param(dptx_force_link_rate, int, 0644);
 
 int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
 		     u8 die)
 {
 	struct dptx_port *dptx = service->cookie;
 	struct dcpdptx_connection_cmd cmd, resp;
-	u32 unk_field = 0x0; // seen as 0x100 under some conditions
+	/*
+	 * macOS sends 0xa0101 here for a display behind a Thunderbolt DP
+	 * tunnel (captured under the m1n1 hypervisor on a Mac mini with a
+	 * Studio Display: connectTo(target=0x8011, unk1=0xa0101)). The 0x0
+	 * this driver has always sent is what DP alt mode uses, where the DCP
+	 * owns the Type-C PHY.
+	 */
+	u32 unk_field = dptx_unk_override >= 0 ? (u32)dptx_unk_override :
+			dptx->atcphy ? 0x0 : 0xa0101;
 	int ret;
 	u32 target = FIELD_PREP(DCPDPTX_REMOTE_PORT_CORE, core) |
 		     FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
@@ -257,6 +281,18 @@ static int dptxport_call_get_max_lane_count(struct apple_epic_service *service,
 	if (reply_size < sizeof(*reply))
 		return -EINVAL;
 
+	if (!dptx->atcphy) {
+		/*
+		 * No Type-C PHY: the DP link is carried over a Thunderbolt
+		 * tunnel which the DCP does not own, so there is no PHY to
+		 * ask. Report the maximum the DP IN adapter can carry.
+		 */
+		dptx->lane_count = 4;
+		reply->retcode = cpu_to_le32(0);
+		reply->lane_count = cpu_to_le64(dptx->lane_count);
+		return 0;
+	}
+
 	ret = phy_validate(dptx->atcphy, PHY_MODE_DP, 0, &phy_ops);
 	if (ret < 0) {
 		dev_err(dcp->dev, "phy_validate failed: %d\n", ret);
@@ -390,6 +426,13 @@ static int dptxport_call_set_link_rate(struct apple_epic_service *service,
 
 	link_rate = le32_to_cpu(request->link_rate);
 	trace_dptxport_call_set_link_rate(dptx, link_rate);
+
+	if (dptx_force_link_rate && link_rate && link_rate != dptx_force_link_rate) {
+		dev_info(service->ep->dcp->dev,
+			 "DPTXPort: forcing link rate 0x%x -> 0x%x\n",
+			 link_rate, dptx_force_link_rate);
+		link_rate = dptx_force_link_rate;
+	}
 
 	switch (link_rate) {
 	case LINK_RATE_RBR:
