@@ -243,7 +243,7 @@ static void afk_recv_handle_init(struct apple_dcp_afkep *ep, u32 channel,
 {
 	char name[32];
 	s64 epic_unit = -1;
-	u32 ch_idx;
+	int ch_idx;
 	const char *service_name = name;
 	const char *epic_name = NULL, *epic_class = NULL;
 	const struct apple_epic_service_ops *ops;
@@ -305,7 +305,26 @@ static void afk_recv_handle_init(struct apple_dcp_afkep *ep, u32 channel,
 		goto free;
 	}
 
-	ch_idx = ep->num_channels++;
+	/*
+	 * Reuse a torn-down slot instead of always taking a fresh one.
+	 *
+	 * Every DPTX connect brings up two services on the AV endpoint and the
+	 * old ones are never reclaimed, so a handful of connect/disconnect
+	 * cycles walks num_channels up to AFK_MAX_CHANNEL (16) and from then on
+	 * every new service is rejected with "too many enabled services" - the
+	 * display stops working until the machine is rebooted. Measured: 12 of
+	 * 16 slots used after three connects on a tunnelled Studio Display.
+	 */
+	ch_idx = -1;
+	for (u32 i = 0; i < ep->num_channels; i++) {
+		if (!ep->services[i].enabled && ep->services[i].torndown) {
+			ch_idx = i;
+			break;
+		}
+	}
+	if (ch_idx < 0)
+		ch_idx = ep->num_channels++;
+
 	spin_lock_init(&ep->services[ch_idx].lock);
 	ep->services[ch_idx].enabled = true;
 	ep->services[ch_idx].torndown = false;

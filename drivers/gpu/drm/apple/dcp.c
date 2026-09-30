@@ -380,6 +380,28 @@ int dcp_get_connector_type(struct platform_device *pdev)
  * the internal panel, carries the real 237333328). Override it here so the
  * value can be probed without rebuilding the device tree.
  */
+bool dcp_allow_virtual_modes = false;
+module_param(dcp_allow_virtual_modes, bool, 0644);
+MODULE_PARM_DESC(dcp_allow_virtual_modes, "Keep the DCP's virtual (DSC) timing modes");
+
+bool dcp_add_5k_mode = false;
+module_param(dcp_add_5k_mode, bool, 0644);
+MODULE_PARM_DESC(dcp_add_5k_mode, "Offer a synthetic 5120x2880 mode (DCP timing 43)");
+
+int apple_dpxbar_finish_dp_tunnel(struct mux_control *mux);
+
+bool dcp_finish_dp_tunnel = true;
+module_param(dcp_finish_dp_tunnel, bool, 0644);
+MODULE_PARM_DESC(dcp_finish_dp_tunnel, "Arm DP IN + PHY + crossbar from inside dcp_dptx_connect()");
+
+int dcp_force_timing_id = -1;
+module_param(dcp_force_timing_id, int, 0644);
+MODULE_PARM_DESC(dcp_force_timing_id, "Override the DCP timing mode id (-1 = off)");
+
+int dcp_force_color_id = -1;
+module_param(dcp_force_color_id, int, 0644);
+MODULE_PARM_DESC(dcp_force_color_id, "Override the DCP color mode id (-1 = off)");
+
 int dcp_frequency_override = -1;
 module_param(dcp_frequency_override, int, 0644);
 
@@ -503,6 +525,28 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	else
 		dev_dbg(dcp->dev, "dcp_dptx_connect: waited %d ms for link\n",
 			jiffies_to_msecs(DPTX_CONNECT_TIMEOUT - ret));
+
+	/*
+	 * Finish the tunnel here, while the link is still up.
+	 *
+	 * The firmware brings a tunnelled display up and drops it again roughly
+	 * a second later, and every later connect in the same boot stops at
+	 * "IOMFB: IOAVVideoInterface published" without ever asserting HPD - the
+	 * DPTX link state degrades until the machine is rebooted (the drive
+	 * settings it asks for climb 19 -> 108 -> 152 -> 205 across attempts).
+	 * So there is exactly one chance per boot and no userspace poll is fast
+	 * enough to take it; arming the DP IN adapter, running the PHY's
+	 * configureDPTunnelMode writes and enabling the crossbar clocks has to
+	 * happen right here.
+	 */
+	if (!dcp->phy && dcp->xbar && dcp_finish_dp_tunnel) {
+		int fret = apple_dpxbar_finish_dp_tunnel(dcp->xbar);
+
+		if (fret)
+			dev_warn(dcp->dev, "finish_dp_tunnel: %d\n", fret);
+		else
+			dev_info(dcp->dev, "finish_dp_tunnel: done\n");
+	}
 
 	usleep_range(5, 10);
 

@@ -600,6 +600,17 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 		/* just try to ACK and hope for the best... */
 		dev_info(service->ep->dcp->dev, "DPTXPort: acking unhandled call %u\n",
 			idx);
+		/*
+		 * The firmware sends SET_TILED_DISPLAY_HINTS (21) twice on a
+		 * Studio Display: once with the real tile descriptor when the
+		 * display appears, and once filled with 0xff when it goes
+		 * away. Both land here, and which one we got decides whether
+		 * the teardown that follows is a symptom or the cause, so dump
+		 * the payload.
+		 */
+		print_hex_dump(KERN_INFO, "dptx-call: ", DUMP_PREFIX_OFFSET,
+			       16, 1, data,
+			       min_t(size_t, data_size, 0x90), false);
 		fallthrough;
 	case DPTX_APCALL_GET_DOWN_SPREAD:
 	case DPTX_APCALL_SET_DOWN_SPREAD:

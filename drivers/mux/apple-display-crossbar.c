@@ -12,6 +12,7 @@
 #include <linux/err.h>
 #include <linux/io.h>
 #include <linux/mod_devicetable.h>
+#include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/mux/driver.h>
 #include <linux/of.h>
@@ -106,6 +107,32 @@ module_param(tunable_override, int, 0644);
  * selection so the DP IN adapter is armed before the clocks start, which is
  * the order macOS uses.
  */
+/*
+ * Physical address of the Type-C PHY's ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0
+ * (core + 0x7000). macOS' configureDPTunnelMode writes it between arming the
+ * DP IN adapter and enabling the crossbar clocks, and that is the one step
+ * this driver could not reach - the phy driver owns the region. Map it
+ * separately here for the combined bring-up below; 0 disables the step.
+ */
+int apple_atcphy_dp_tunnel_pclk(const char *name);
+
+/*
+ * Which Type-C PHY to run configureDPTunnelMode on. There is one per ATC port
+ * and picking "the first one" got 703000000.phy, which is a different port and
+ * sits idle - its DP_CTRL0 reads 0. The tunnelled display on j314s is on atc1.
+ */
+static char *phy_name = "b03000000.phy";
+module_param(phy_name, charp, 0644);
+MODULE_PARM_DESC(phy_name, "Device name of the Type-C PHY to program");
+
+static bool phy_dp_ctrl0;
+module_param(phy_dp_ctrl0, bool, 0644);
+MODULE_PARM_DESC(phy_dp_ctrl0, "Run the PHY's configureDPTunnelMode writes during bring-up");
+
+static bool dpin_read;
+module_param(dpin_read, bool, 0644);
+MODULE_PARM_DESC(dpin_read, "Allow reading the DP IN block in the regs dump (SErrors when ACIO is off)");
+
 static bool dpin_program;
 module_param(dpin_program, bool, 0644);
 
@@ -123,11 +150,17 @@ module_param(dpin_program, bool, 0644);
  * REG_04 are hardware status (writes do not stick); ENABLE and HOLD are the
  * ones that matter.
  */
-#define DPIN_MODE 0x00		/* ro: 5 armed, 4 streaming */
-#define DPIN_REG_04 0x04	/* ro: 1 armed, 2 streaming */
+/*
+ * DP IN adapter block, captured from macOS under the m1n1 hypervisor
+ * (AppleATCDPINAdapterPort). MODE is writable after all - an earlier guess
+ * that it was read-only came from writing 4, which the hardware sets by
+ * itself once pixels flow; macOS only ever writes 2 and 5.
+ */
+#define DPIN_MODE 0x00		/* 5 = arm, 2 = park; reads 4 while streaming */
+#define DPIN_REG_04 0x04	/* 1 = arm, 2 = streaming */
 #define DPIN_ENABLE 0x08	/* 3 = on, 0 = off */
-#define DPIN_HOLD 0x0c		/* 1 = held, 0 = released */
-#define DPIN_STATUS 0x10	/* follows HOLD */
+#define DPIN_INACTIVE 0x0c	/* DPTX_INACTIVE: 0 = active */
+#define DPIN_INACTIVE_ACK 0x10	/* DPTX_INACTIVE_ACK, poll until it matches */
 
 enum { MUX_DPPHY = 0, MUX_DPIN0 = 1, MUX_DPIN1 = 2, MUX_MAX = 3 };
 static const char *apple_dpxbar_names[MUX_MAX] = { "dpphy", "dpin0", "dpin1" };
@@ -343,8 +376,16 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 	}
 
 	if (!enable && dpin_program && dpxbar->dpin[index]) {
-		writel(1, dpxbar->dpin[index] + DPIN_HOLD);
-		writel(0, dpxbar->dpin[index] + DPIN_ENABLE);
+		/* teardown, macOS order: 0x04=1, MODE=2, INACTIVE=1, poll ACK */
+		void __iomem *dpin = dpxbar->dpin[index];
+		u32 ack;
+
+		writel(1, dpin + DPIN_REG_04);
+		writel(2, dpin + DPIN_MODE);
+		writel(1, dpin + DPIN_INACTIVE);
+		readl_poll_timeout_atomic(dpin + DPIN_INACTIVE_ACK, ack,
+					  ack == 1, 5, 1000);
+		writel(0, dpin + DPIN_ENABLE);
 	}
 
 	dpxbar_set32(dpxbar, OUT_N_CLK_EN, atc_bit);
@@ -371,12 +412,31 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 
 	if (enable) {
 		/*
-		 * Arm the DP IN adapter before the crossbar starts feeding it,
-		 * which is the order macOS uses. Doing it afterwards (by hand
-		 * from userspace) makes no difference.
+		 * Arm the DP IN adapter first, in macOS' exact order. Traced
+		 * on a Mac mini under the m1n1 hypervisor while macOS brought
+		 * a Studio Display up over a Thunderbolt tunnel:
+		 *
+		 *   0x08 = 3, 0x04 = 1, 0x00 = 5, 0x0c = 0, poll 0x10 == 0
+		 *
+		 * Only then does it touch the crossbar clocks, and dpin's 0x00
+		 * flips to 4 on its own right after the FIFO_RD_PCLK1 toggle.
+		 * Writing only ENABLE and HOLD (what this driver used to do)
+		 * leaves 0x00 stuck at 5 and no pixels ever leave the pipe.
 		 */
-		if (dpin_program && dpxbar->dpin[index])
-			writel(3, dpxbar->dpin[index] + DPIN_ENABLE);
+		if (dpin_program && dpxbar->dpin[index]) {
+			void __iomem *dpin = dpxbar->dpin[index];
+			u32 ack;
+
+			writel(3, dpin + DPIN_ENABLE);
+			writel(1, dpin + DPIN_REG_04);
+			writel(5, dpin + DPIN_MODE);
+			writel(0, dpin + DPIN_INACTIVE);
+			if (readl_poll_timeout_atomic(dpin + DPIN_INACTIVE_ACK,
+						      ack, ack == 0, 5, 1000))
+				dev_warn(dpxbar->dev,
+					 "%s: DPTX_INACTIVE_ACK stuck\n",
+					 apple_dpxbar_names[index]);
+		}
 
 		/* macOS writes the tunable here, just before the clock enables */
 		writel(tunable_override >= 0 ? (u32)tunable_override : 0,
@@ -404,10 +464,6 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 		dpxbar_clear32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
 		udelay(10);
 		dpxbar_set32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
-
-		/* release the DP IN adapter now that it has a source */
-		if (dpin_program && dpxbar->dpin[index])
-			writel(0, dpxbar->dpin[index] + DPIN_HOLD);
 
 		dpxbar->selected_dispext[index] = state;
 	}
@@ -451,6 +507,14 @@ static const struct { u16 off; const char *name; } dpxbar_regs[] = {
 static ssize_t regs_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
+	/*
+	 * Reading the DP IN block faults with an SError when ACIO is not
+	 * powered, which is the case whenever no Thunderbolt device is
+	 * attached - and an SError here takes the machine down with no trace
+	 * in the log. Only touch it once someone has asked for DP IN
+	 * programming, which implies a display is present.
+	 */
+
 	struct mux_chip *chip = dev_get_drvdata(dev);
 	struct apple_dpxbar *dpxbar = mux_chip_priv(chip);
 	int len = 0;
@@ -468,25 +532,217 @@ static ssize_t regs_show(struct device *dev, struct device_attribute *attr,
 	 * The DP IN blocks are claimed by this driver now, so /dev/mem cannot
 	 * reach them any more - dump them here instead. macOS shows MODE going
 	 * 5 -> 4 and REG_04 going 1 -> 2 once a stream is actually running.
+	 *
+	 * Gated behind dpin_read: reading these registers while ACIO is
+	 * unpowered (no Thunderbolt device attached) raises an SError that
+	 * takes the machine down without leaving anything in the log.
 	 */
-	for (int i = MUX_DPIN0; i <= MUX_DPIN1; i++) {
+	for (int i = MUX_DPIN0; dpin_read && i <= MUX_DPIN1; i++) {
 		if (!dpxbar->dpin[i])
 			continue;
 		len += sysfs_emit_at(buf, len,
-				     "%s: MODE=0x%x REG_04=0x%x ENABLE=0x%x HOLD=0x%x STATUS=0x%x\n",
+				     "%s: MODE=0x%x REG_04=0x%x ENABLE=0x%x INACTIVE=0x%x ACK=0x%x\n",
 				     apple_dpxbar_names[i],
 				     readl(dpxbar->dpin[i] + DPIN_MODE),
 				     readl(dpxbar->dpin[i] + DPIN_REG_04),
 				     readl(dpxbar->dpin[i] + DPIN_ENABLE),
-				     readl(dpxbar->dpin[i] + DPIN_HOLD),
-				     readl(dpxbar->dpin[i] + DPIN_STATUS));
+				     readl(dpxbar->dpin[i] + DPIN_INACTIVE),
+				     readl(dpxbar->dpin[i] + DPIN_INACTIVE_ACK));
 	}
 
 	return len;
 }
 static DEVICE_ATTR_RO(regs);
 
-static struct attribute *dpxbar_attrs[] = { &dev_attr_regs.attr, NULL };
+/*
+ * Arm / park the DP IN adapter by hand.
+ *
+ * macOS does this *after* connectTo + setPowerState, not while it first
+ * selects the crossbar - it selects the crossbar twice and only the second
+ * pass touches the DP IN block. Doing it during the select (what
+ * dpin_program=1 does) arms the adapter before the DPTX link trains, and
+ * then the link never comes up at all.
+ *
+ * Running it from here also keeps it out of the crossbar spinlock, in
+ * process context, at a moment when ACIO is known to be powered.
+ *
+ *   echo 1 > dpin0_arm   0x08=3, 0x04=1, 0x00=5, 0x0c=0, poll 0x10 == 0
+ *   echo 0 > dpin0_arm   0x04=1, 0x00=2, 0x0c=1, poll 0x10 == 1, 0x08=0
+ */
+static int apple_dpxbar_dpin_bringup(struct apple_dpxbar *dpxbar,
+				     unsigned int index)
+{
+	void __iomem *dpin = dpxbar->dpin[index];
+	u32 ack;
+	int ret;
+
+	if (!dpin)
+		return -ENODEV;
+
+	/*
+	 * The whole macOS bring-up tail in one go, in its exact order
+	 * (captured under the m1n1 hypervisor):
+	 *
+	 *   dpin  ENABLE=3, REG_04=1, MODE=5, INACTIVE=0, poll ACK
+	 *   PHY   DP_CTRL0 = 0xe005, 0xe00d, 0xe01d
+	 *   xbar  tunable, clock enables, RD_PCLK1 toggle
+	 *
+	 * Doing these as three separate steps seconds apart, with a
+	 * DPTX connect in between, never got the crossbar's clock
+	 * status registers off zero.
+	 */
+	int dispext = dpxbar->selected_dispext[index];
+	u32 dispext_bit, dispext_bit_en, atc_bit;
+	unsigned long flags;
+
+	if (dispext < 0) {
+		dev_warn(dpxbar->dev, "dpin%d: crossbar not selected\n", index);
+		return -EINVAL;
+	}
+	dispext_bit = 1 << dispext;
+	dispext_bit_en = 1 << (2 * dispext);
+	atc_bit = index == MUX_DPIN0 ? ATC_DPIN0 : ATC_DPIN1;
+
+
+	writel(3, dpin + DPIN_ENABLE);
+	writel(1, dpin + DPIN_REG_04);
+	writel(5, dpin + DPIN_MODE);
+	writel(0, dpin + DPIN_INACTIVE);
+	ret = readl_poll_timeout(dpin + DPIN_INACTIVE_ACK, ack,
+			 ack == 0, 20, 20000);
+
+	if (phy_dp_ctrl0)
+		{
+		int pret = apple_atcphy_dp_tunnel_pclk(phy_name);
+
+		if (pret)
+		dev_warn(dpxbar->dev, "PHY %s: %d\n", phy_name, pret);
+	}
+
+	spin_lock_irqsave(&dpxbar->lock, flags);
+	writel(0, dpxbar->regs + UNK_TUNABLE);
+	dpxbar_clear32(dpxbar, FIFO_WR_N_CLK_EN, dispext_bit);
+	dpxbar_clear32(dpxbar, FIFO_RD_N_CLK_EN, dispext_bit);
+	dpxbar_clear32(dpxbar, OUT_N_CLK_EN, atc_bit);
+	dpxbar_set32(dpxbar, FIFO_WR_UNK_EN, dispext_bit);
+	dpxbar_set32(dpxbar, FIFO_RD_UNK_EN, dispext_bit_en);
+	dpxbar_set32(dpxbar, OUT_UNK_EN, atc_bit);
+	dpxbar_set32(dpxbar, FIFO_WR_DPTX_CLK_EN, dispext_bit);
+	dpxbar_set32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
+	dpxbar_set32(dpxbar, OUT_PCLK1_EN, atc_bit);
+	dpxbar_set32(dpxbar, CROSSBAR_ATC_EN, atc_bit);
+	dpxbar_set32(dpxbar, CROSSBAR_DISPEXT_EN, dispext_bit);
+	dpxbar_clear32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
+	udelay(10);
+	dpxbar_set32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
+	spin_unlock_irqrestore(&dpxbar->lock, flags);
+
+	return ret;
+}
+
+/*
+ * Finish the DP tunnel bring-up: arm the DP IN adapter, run the PHY's
+ * configureDPTunnelMode writes, then enable the crossbar clocks - all in one
+ * go, in macOS' order.
+ *
+ * This has to be callable from the DCP driver rather than only from sysfs.
+ * A tunnelled display's link comes up and the firmware drops it again about a
+ * second later, and no userspace poll (even at 100 ms) reacts in time; by the
+ * time a script sees DP-1 go "connected" the firmware has already torn it
+ * down, and every later connect in that boot stops at "IOAVVideoInterface
+ * published" without ever asserting HPD.
+ */
+int apple_dpxbar_finish_dp_tunnel(struct mux_control *mux)
+{
+	struct apple_dpxbar *dpxbar;
+	unsigned int index;
+
+	if (!mux)
+		return -EINVAL;
+
+	dpxbar = mux_chip_priv(mux->chip);
+	index = mux_control_get_index(mux);
+
+	return apple_dpxbar_dpin_bringup(dpxbar, index);
+}
+EXPORT_SYMBOL_GPL(apple_dpxbar_finish_dp_tunnel);
+
+static ssize_t dpin_do(struct device *dev, int index, const char *buf,
+		       size_t count)
+{
+	struct mux_chip *chip = dev_get_drvdata(dev);
+	struct apple_dpxbar *dpxbar;
+	void __iomem *dpin;
+	unsigned int arm;
+	u32 ack;
+	int ret;
+
+	if (!chip || kstrtouint(buf, 0, &arm) || arm > 3)
+		return -EINVAL;
+	dpxbar = mux_chip_priv(chip);
+	dpin = dpxbar->dpin[index];
+	if (!dpin)
+		return -ENODEV;
+
+	if (arm == 3) {
+		ret = apple_dpxbar_dpin_bringup(dpxbar, index);
+	} else if (arm == 2) {
+		/*
+		 * Pre-connect: clear DPTX_INACTIVE only.
+		 *
+		 * The DPTX link will not train unless this is 0 beforehand
+		 * (measured over a whole evening), but doing the full arm here
+		 * - ENABLE, REG_04, MODE - stops it training as well, and that
+		 * state sticks until the machine is power cycled. So split it:
+		 * this half before the connect, the rest after.
+		 */
+		writel(0, dpin + DPIN_INACTIVE);
+		ret = readl_poll_timeout(dpin + DPIN_INACTIVE_ACK, ack,
+					 ack == 0, 20, 20000);
+	} else if (arm == 1) {
+		writel(3, dpin + DPIN_ENABLE);
+		writel(1, dpin + DPIN_REG_04);
+		writel(5, dpin + DPIN_MODE);
+		writel(0, dpin + DPIN_INACTIVE);
+		ret = readl_poll_timeout(dpin + DPIN_INACTIVE_ACK, ack,
+					 ack == 0, 20, 20000);
+	} else {
+		writel(1, dpin + DPIN_REG_04);
+		writel(2, dpin + DPIN_MODE);
+		writel(1, dpin + DPIN_INACTIVE);
+		ret = readl_poll_timeout(dpin + DPIN_INACTIVE_ACK, ack,
+					 ack == 1, 20, 20000);
+		writel(0, dpin + DPIN_ENABLE);
+	}
+
+	dev_info(dev, "dpin%d %s: MODE=0x%x REG_04=0x%x ACK=0x%x%s\n",
+		 index, arm == 3 ? "full" : arm == 2 ? "pre" : arm ? "arm" : "park",
+		 readl(dpin + DPIN_MODE), readl(dpin + DPIN_REG_04),
+		 readl(dpin + DPIN_INACTIVE_ACK), ret ? " (ACK timeout)" : "");
+
+	return count;
+}
+
+static ssize_t dpin0_arm_store(struct device *dev, struct device_attribute *a,
+			       const char *buf, size_t count)
+{
+	return dpin_do(dev, MUX_DPIN0, buf, count);
+}
+static DEVICE_ATTR_WO(dpin0_arm);
+
+static ssize_t dpin1_arm_store(struct device *dev, struct device_attribute *a,
+			       const char *buf, size_t count)
+{
+	return dpin_do(dev, MUX_DPIN1, buf, count);
+}
+static DEVICE_ATTR_WO(dpin1_arm);
+
+static struct attribute *dpxbar_attrs[] = {
+	&dev_attr_regs.attr,
+	&dev_attr_dpin0_arm.attr,
+	&dev_attr_dpin1_arm.attr,
+	NULL,
+};
 ATTRIBUTE_GROUPS(dpxbar);
 
 static int apple_dpxbar_probe(struct platform_device *pdev)

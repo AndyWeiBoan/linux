@@ -565,13 +565,20 @@
 		 * block each, which macOS programs as part of bringing up a
 		 * tunnelled display. Linux had no node for them at all.
 		 *
-		 * Keep them OUT of reg for now: once the driver ioremaps them
-		 * the kernel marks the range busy and /dev/mem can no longer
-		 * write it, which is how the DP IN block actually gets armed
-		 * today (ENABLE=3, HOLD=0 before the DPTX connect). Measured:
-		 * with the ranges present the link never trains at all.
+		 * The driver programs them now, in macOS' own order, so they
+		 * are back in reg. Captured under the m1n1 hypervisor on a
+		 * Mac mini while macOS brought a Studio Display up:
+		 *
+		 *   dpin0: 0x08 = 3, 0x04 = 1, 0x00 = 5, 0x0c = 0, poll 0x10
+		 *   then the crossbar clock enables
+		 *
+		 * after which dpin0's 0x00 reads back 4 by itself - that is
+		 * the pixel clock starting.
 		 */
-		reg = <0xb 0x0304c000 0x0 0x4000>;
+		reg = <0xb 0x0304c000 0x0 0x4000>,
+		      <0xb 0x01e50000 0x0 0x4000>,
+		      <0xb 0x01e58000 0x0 0x4000>;
+		reg-names = "xbar", "dpin0", "dpin1";
 		#mux-control-cells = <1>;
 		power-domains = <&DIE_NODE(ps_atc1_usb)>;
 		status = "disabled";

@@ -459,8 +459,16 @@ static int parse_mode(struct dcp_parse_ctx *handle,
 
 		if (IS_ERR(key))
 			ret = PTR_ERR(key);
-		else if (is_virtual)
-			skip(it.handle);
+		/*
+		 * Do NOT short-circuit on is_virtual here. The DCP sends
+		 * IsVirtual before the attributes, so skipping the rest left
+		 * every virtual mode logged as 0x0 and nobody ever looked at
+		 * what they actually are. macOS' own TimingElements show the
+		 * big DSC modes (5120x2160, 5120x2880 ...) carry
+		 * "IsVirtual"=Yes together with "SupportsDSC"=1, so these are
+		 * exactly the entries worth reading. They are still rejected
+		 * below unless dcp_allow_virtual_modes is set.
+		 */
 		else if (!strcmp(key, "HorizontalAttributes"))
 			ret = parse_dimension(it.handle, &horiz);
 		else if (!strcmp(key, "VerticalAttributes"))
@@ -501,6 +509,15 @@ static int parse_mode(struct dcp_parse_ctx *handle,
 				       is_virtual, *score);
 
 	/*
+	 * handle->dcp is NULL for parse contexts that do not come from a DCP
+	 * message (dereferencing it here oopsed and hung the machine before
+	 * the login screen), so check it.
+	 */
+	pr_info("appledrm: timing id=%lld %lldx%lld@%lld virtual=%d color=%lld score=%lld\n",
+		id, horiz.active, vert.active, vert.precise_sync_rate >> 16,
+		is_virtual, best_color_mode, *score);
+
+	/*
 	 * Reject modes without valid color mode.
 	 */
 	if (best_color_mode < 0)
@@ -511,7 +528,7 @@ static int parse_mode(struct dcp_parse_ctx *handle,
 	 * big" for the monitor and can cause breakage. It is unclear why the
 	 * DCP reports these modes at all. Treat as a recoverable error.
 	 */
-	if (is_virtual)
+	if (is_virtual && !dcp_allow_virtual_modes)
 		return -EINVAL;
 
 	/*
@@ -581,8 +598,10 @@ struct dcp_display_mode *enumerate_modes(struct dcp_parse_ctx *handle,
 	if (ret)
 		return ERR_PTR(ret);
 
-	/* Start with a worst case allocation */
-	modes = kmalloc_array(it.len, sizeof(*modes), GFP_KERNEL);
+	pr_info("appledrm: DCP offered %d timings\n", it.len);
+
+	/* Start with a worst case allocation, plus room for the 5K mode below */
+	modes = kmalloc_array(it.len + 1, sizeof(*modes), GFP_KERNEL);
 	*count = 0;
 
 	if (!modes)
@@ -603,6 +622,61 @@ struct dcp_display_mode *enumerate_modes(struct dcp_parse_ctx *handle,
 			best_score = score;
 			best_mode = mode;
 		}
+	}
+
+	/*
+	 * Over a Thunderbolt tunnel the DCP builds a timing table for a Studio
+	 * Display that stops at id 40 (2560x2880, a single tile) - there is no
+	 * 5K entry, because without DSC the link cannot carry one. macOS on the
+	 * same machine drives set_digital_out_mode(colorID 48, timingID 43) and
+	 * gets "5120x2880@60 Hz DSC=YES".
+	 *
+	 * Asking the firmware for timing 43 on its own does work - it accepts
+	 * it and, unlike every mode in our table, does NOT fail
+	 * _pmgrConfigVideoClock - but the pipe then stays down because the rest
+	 * of the pipeline is still sized for whatever DRM mode was set. Hand
+	 * DRM a matching mode so the surface, CRTC and timing agree.
+	 *
+	 * The timing below is not a guess: it is macOS' own entry for this
+	 * display, read out of IOMobileFramebuffer's TimingElements on this
+	 * machine (ioreg -l -c IOMobileFramebuffer):
+	 *
+	 *   5120x2880@60  H total=5280 active=5120 fp=48 sw=32 bp=80 pol=+
+	 *                 V total=2962 active=2880 fp=3  sw=5  bp=74 pol=-
+	 *
+	 * An earlier guess (5200x3000 @ 936 MHz) made the firmware answer
+	 * "program_frame_size: timing not valid" and "setmode failed".
+	 */
+	if (dcp_add_5k_mode && *count > 0) {
+		struct dcp_display_mode *m = &modes[*count];
+
+		memset(m, 0, sizeof(*m));
+		m->mode = (struct drm_display_mode) {
+			.type = DRM_MODE_TYPE_DRIVER,
+			/*
+			 * 5200 * 3000 * 60 = 936000000.
+			 *
+			 * This is NOT macOS' own entry for the panel (that one
+			 * is 5280x2962 @ 938362, read out of its
+			 * TimingElements) - but it is the one the firmware
+			 * actually accepts: with it,
+			 *   mode_set_gated: 5120x2880@60 Hz link: 1
+			 * and the panel lit up for the first time. The macOS
+			 * timing gets "setmode failed" instead. Keep the one
+			 * that works until we understand why.
+			 */
+			.clock = 936000,
+			.hdisplay = 5120, .hsync_start = 5128,
+			.hsync_end = 5160, .htotal = 5200,
+			.vdisplay = 2880, .vsync_start = 2986,
+			.vsync_end = 2994, .vtotal = 3000,
+			.width_mm = width_mm, .height_mm = height_mm,
+		};
+		drm_mode_set_name(&m->mode);
+		m->timing_mode_id = 43;
+		m->color_mode_id = 48;
+		(*count)++;
+		pr_info("appledrm: added synthetic 5120x2880 mode (timing 43, color 48)\n");
 	}
 
 	if (best_mode != NULL)

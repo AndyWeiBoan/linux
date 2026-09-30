@@ -634,7 +634,11 @@ struct atcphy_hw {
  * @mux: Type-C mux instance
  * @lock: Mutex for synchronizing register access across PHY, Type-C switch/mux and reset controller
  */
+static LIST_HEAD(atcphy_list);
+static DEFINE_MUTEX(atcphy_list_lock);
+
 struct apple_atcphy {
+	struct list_head list;	/* for apple_atcphy_dp_tunnel_pclk() */
 	struct device_node *np;
 	struct device *dev;
 
@@ -1396,6 +1400,213 @@ static void atcphy_enable_dp_aux(struct apple_atcphy *atcphy)
 	atcphy->dp_link_rate = -1;
 }
 
+static bool dp_tunnel_auspll = true;
+module_param(dp_tunnel_auspll, bool, 0644);
+MODULE_PARM_DESC(dp_tunnel_auspll, "Replay macOS' AUSPLL programming for a tunnelled display");
+
+static bool dp_tunnel_keep_bit0;
+module_param(dp_tunnel_keep_bit0, bool, 0644);
+MODULE_PARM_DESC(dp_tunnel_keep_bit0, "Keep DP_CTRL0 bit 0 set during the DP tunnel writes");
+
+static bool dp_tunnel_pclk = true;
+module_param(dp_tunnel_pclk, bool, 0644);
+MODULE_PARM_DESC(dp_tunnel_pclk,
+		 "Enable DPTX_PCLK1 in Thunderbolt/USB4 mode for tunnelled displays");
+
+/*
+ * A display reached over a Thunderbolt DP tunnel never enters DP altmode, so
+ * atcphy_enable_dp_aux() is never called for it and DPTX_PCLK1 is left off.
+ * The display crossbar then sits with FIFO_RD_PCLK1_EN / OUT_PCLK1_EN set but
+ * their STAT registers reading zero -- the pixel clock is requested and never
+ * runs -- and the DCP firmware ends up trying to program a video PLL itself:
+ *
+ *   PmgrService.cpp:335: _pmgrConfigVideoClock Failed to configure video clock
+ *
+ * after which it powers the pipe down and swallows every swap.
+ *
+ * macOS does this from the AP side too, in AppleT8103TypeCPhy (the class name
+ * is shared with t600x):
+ *
+ *   AppleT6000TypeCPhy@1: AppleT8103TypeCPhy::configureDPTunnelMode:
+ *           Configuring PCLK(1) at link rate: 20
+ *
+ * Only PCLK1 is named there, so only PCLK1 is touched here. The AUX channel
+ * belongs to the tunnel, not to this PHY, so none of the LPDPTX setup applies.
+ */
+static void atcphy_enable_dp_tunnel_pclk(struct apple_atcphy *atcphy)
+{
+	/*
+	 * macOS' AppleT8103TypeCPhy::configureDPTunnelMode, captured verbatim
+	 * under the m1n1 hypervisor on a Mac mini while a Studio Display came
+	 * up over a Thunderbolt tunnel (atc-phy1 reg[8] is core + 0x7000, the
+	 * ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0 this driver already knows):
+	 *
+	 *   W 0x7000 = 0xe005
+	 *   W 0x7000 = 0xe00d
+	 *   W 0x7000 = 0xe01d
+	 *
+	 * and it does so *between* clearing the DP IN adapter's DPTX_INACTIVE
+	 * and programming the crossbar clocks. Whole-register writes, not
+	 * read-modify-write - reproduce them exactly.
+	 *
+	 * Idle here reads 0xe001, so the bits that come up are 2, 3 and
+	 * finally 4 (the low bit of DPTX_PCLK1_SELECT); bits 13-15 are the
+	 * three PCLK enables and are already set.
+	 */
+	static const u32 seq[] = { 0xe005, 0xe00d, 0xe01d };
+	u32 reg;
+	int ret;
+
+	if (atcphy->hw->gen == ATCPHY_GENERATION_T8122)
+		return;
+
+	/*
+	 * Before touching DP_CTRL0 macOS pokes two core registers - missed on
+	 * the first read of the capture because only the DP_CTRL0 writes were
+	 * grepped for. 0x1b0 is ACIOPHY_SLEEP_CTRL; 0x08 has no name in this
+	 * driver yet. Replayed verbatim, in this order.
+	 */
+	if (dp_tunnel_auspll) {
+		static const struct { u32 off, val; } pre[] = {
+			{ 0x008, 0x11833fef },
+			{ 0x1b0, 0x15570cff },
+			{ 0x008, 0x11833fef },
+		};
+
+		for (int i = 0; i < ARRAY_SIZE(pre); i++) {
+			writel(pre[i].val, atcphy->regs.core + pre[i].off);
+			udelay(10);
+		}
+	}
+
+	for (int i = 0; i < ARRAY_SIZE(seq); i++) {
+		/*
+		 * dp_tunnel_keep_bit0: macOS' values clear bit 0, which reads 1
+		 * when the PHY is idle. Writing them verbatim leaves AUSPLL
+		 * unlocked (DP_PCLK_STAT 0), while an earlier read-modify-write
+		 * that only set DPTX_PCLK1_SELECT and the enables did lock it.
+		 * The trace only ever showed writes, so try keeping bit 0.
+		 */
+		writel(seq[i] | (dp_tunnel_keep_bit0 ? 1 : 0),
+		       atcphy->regs.core +
+				ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0);
+		udelay(10);
+	}
+
+	/*
+	 * Then macOS programs the AUSPLL and commits it, which is what actually
+	 * starts the pixel clock - without this the PLL never locks, the
+	 * crossbar's FIFO/OUT clock status registers stay at 0 and the panel
+	 * stays black even though every other register matches.
+	 *
+	 * Replayed verbatim from the same capture (offsets are core-relative;
+	 * the trace shows them inside atc-phy1 reg[19], which is core + 0x1000):
+	 *
+	 *   0x2080/0x2084/0x2088  AUSPLL_FREQ_DESC_A/B/C
+	 *   0x2000                AUSPLL_APB_CMD_OVERRIDE (the commit)
+	 *
+	 * These are whole-register writes, in this order.
+	 */
+	if (dp_tunnel_auspll) {
+		static const struct { u32 off, val; } pll[] = {
+			{ 0x2224, 0x20086000 },
+			{ 0x2080, 0x2a16021c }, { 0x2080, 0x2a0e021c },
+			{ 0x2080, 0x1e0e021c },
+			{ 0x2084, 0x00000000 },
+			{ 0x2088, 0x00460800 }, { 0x2088, 0x00460a00 },
+			{ 0x2088, 0x00464a00 }, { 0x2088, 0x00454a00 },
+			{ 0x2088, 0x00654a00 },
+			{ 0x2208, 0x00010001 },
+			{ 0x2220, 0x011090a2 },
+			{ 0x2214, 0x000001e1 },
+			{ 0x2200, 0x00002004 }, { 0x2200, 0x00002014 },
+			{ 0x2200, 0x00002054 },
+			{ 0x2000, 0x10000003 }, { 0x2000, 0x10000002 },
+			{ 0x2000, 0x10010001 }, { 0x2000, 0x10010002 },
+		};
+
+		for (int i = 0; i < ARRAY_SIZE(pll); i++) {
+			writel(pll[i].val, atcphy->regs.core + pll[i].off);
+			udelay(10);
+		}
+	}
+
+	ret = readl_poll_timeout_atomic(atcphy->regs.core + ACIOPHY_DP_PCLK_STAT,
+					reg, reg & ACIOPHY_AUSPLL_LOCK, 20, 50000);
+	if (ret)
+		dev_warn(atcphy->dev, "DP tunnel: AUSPLL did not lock\n");
+
+	dev_info(atcphy->dev, "DP tunnel: DP_CTRL0 = 0x%08x, PCLK_STAT = 0x%08x\n",
+		 readl(atcphy->regs.core + ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0),
+		 readl(atcphy->regs.core + ACIOPHY_DP_PCLK_STAT));
+}
+
+/*
+ * macOS programs PCLK1 only once the DPTX firmware has settled on a link rate,
+ * right after SetLinkRate:
+ *
+ *   setLinkRate: linkRate=20  [5.4 Gbps (HBR2)]
+ *   AppleT8103TypeCPhy::configureDPTunnelMode: Configuring PCLK(1) at link rate: 20
+ *
+ * Doing it at mode-change time (where enable_dp_aux would run) is far too
+ * early - the ACIO firmware is still bringing the Thunderbolt link up. Expose
+ * a trigger so the write can be placed at the same point in the sequence.
+ */
+static int atcphy_dp_configure(struct apple_atcphy *atcphy,
+			       enum atcphy_dp_link_rate lr);
+
+/*
+ * Measured on j314s with a Studio Display behind a Thunderbolt DP tunnel:
+ * the ACIO firmware already leaves DP_CTRL0 at 0xe011, i.e. DPTX_PCLK1 is
+ * selected and enabled. What is missing is the PLL itself -
+ * ACIOPHY_DP_PCLK_STAT reads 0, so AUSPLL never locks and no pixel clock
+ * comes out. Writing the DP link rate index here runs the same AUSPLL
+ * programming the DP altmode path uses; in Thunderbolt mode dp_lane[] is
+ * all false, so only the PLL part runs and the Thunderbolt lanes (on
+ * CIO3PLL) are left alone.
+ *
+ *   0 = RBR, 1 = HBR, 2 = HBR2, 3 = HBR3
+ */
+static ssize_t dp_tunnel_pclk_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct apple_atcphy *atcphy = dev_get_drvdata(dev);
+	unsigned int lr;
+	int ret;
+
+	if (!atcphy || kstrtouint(buf, 0, &lr) || lr > ATCPHY_DP_LINK_RATE_HBR3)
+		return -EINVAL;
+
+	ret = atcphy_dp_configure(atcphy, lr);
+	dev_info(atcphy->dev, "DP tunnel: dp_configure(link_rate=%u) = %d\n",
+		 lr, ret);
+
+	return ret ? ret : count;
+}
+static DEVICE_ATTR_WO(dp_tunnel_pclk);
+
+static ssize_t dp_ctrl0_show(struct device *dev, struct device_attribute *attr,
+			     char *buf)
+{
+	struct apple_atcphy *atcphy = dev_get_drvdata(dev);
+
+	if (!atcphy)
+		return -ENODEV;
+
+	return sysfs_emit(buf, "DP_CTRL0 = 0x%08x\nDP_PCLK_STAT = 0x%08x\n",
+			  readl(atcphy->regs.core + ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0),
+			  readl(atcphy->regs.core + ACIOPHY_DP_PCLK_STAT));
+}
+static DEVICE_ATTR_RO(dp_ctrl0);
+
+static struct attribute *atcphy_attrs[] = {
+	&dev_attr_dp_tunnel_pclk.attr,
+	&dev_attr_dp_ctrl0.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(atcphy);
+
 static void atcphy_disable_dp_aux(struct apple_atcphy *atcphy)
 {
 	/* FIXME */
@@ -1932,6 +2143,9 @@ static int atcphy_configure(struct apple_atcphy *atcphy, enum atcphy_mode mode)
 	/* Setup AUX channel if DP altmode is requested */
 	if (atcphy_modes[mode].enable_dp_aux)
 		atcphy_enable_dp_aux(atcphy);
+	else if (dp_tunnel_pclk && (mode == APPLE_ATCPHY_MODE_TBT ||
+				    mode == APPLE_ATCPHY_MODE_USB4))
+		atcphy_enable_dp_tunnel_pclk(atcphy);
 
 	/* Enable clocks and configure lanes */
 	if (atcphy->hw->gen == ATCPHY_GENERATION_T8103) {
@@ -2493,6 +2707,9 @@ static int atcphy_probe(struct platform_device *pdev)
 
 	atcphy->dev = dev;
 	atcphy->np = dev->of_node;
+	mutex_lock(&atcphy_list_lock);
+	list_add_tail(&atcphy->list, &atcphy_list);
+	mutex_unlock(&atcphy_list_lock);
 	mutex_init(&atcphy->lock);
 	platform_set_drvdata(pdev, atcphy);
 
@@ -2528,10 +2745,42 @@ static const struct of_device_id atcphy_match[] = {
 };
 MODULE_DEVICE_TABLE(of, atcphy_match);
 
+/*
+ * Called by the display crossbar driver, which has to do this in the middle of
+ * its own bring-up: macOS programs DP_CTRL0 between arming the DP IN adapter
+ * and enabling the crossbar clocks, and splitting those three steps across
+ * separate sysfs pokes seconds apart never started the pixel clock.
+ *
+ * It has to live here because this driver owns the PHY's register mapping -
+ * reaching the same address with a private ioremap() from the crossbar driver
+ * panics the machine with an SError.
+ */
+int apple_atcphy_dp_tunnel_pclk(const char *name)
+{
+	struct apple_atcphy *atcphy;
+	int ret = -ENODEV;
+
+	mutex_lock(&atcphy_list_lock);
+	list_for_each_entry(atcphy, &atcphy_list, list) {
+		if (name && strcmp(dev_name(atcphy->dev), name))
+			continue;
+		mutex_lock(&atcphy->lock);
+		atcphy_enable_dp_tunnel_pclk(atcphy);
+		mutex_unlock(&atcphy->lock);
+		ret = 0;
+		break;
+	}
+	mutex_unlock(&atcphy_list_lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(apple_atcphy_dp_tunnel_pclk);
+
 static struct platform_driver atcphy_driver = {
 	.driver = {
 		.name = "phy-apple-atc",
 		.of_match_table = atcphy_match,
+		.dev_groups = atcphy_groups,
 	},
 	.probe = atcphy_probe,
 };

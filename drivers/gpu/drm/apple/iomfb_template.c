@@ -457,10 +457,15 @@ dcpep_cb_map_physical(struct apple_dcp *dcp, struct dcp_map_physical_req *req)
 
 static u64 dcpep_cb_get_frequency(struct apple_dcp *dcp)
 {
-	if (dcp_frequency_override > 0)
-		return (u64)dcp_frequency_override;
+	u64 rate;
 
-	return clk_get_rate(dcp->clk);
+	if (dcp_frequency_override > 0)
+		rate = (u64)dcp_frequency_override;
+	else
+		rate = clk_get_rate(dcp->clk);
+
+	dev_info(dcp->dev, "get_frequency -> %llu\n", rate);
+	return rate;
 }
 
 static struct DCP_FW_NAME(dcp_map_reg_resp) dcpep_cb_map_reg(struct apple_dcp *dcp,
@@ -473,6 +478,10 @@ static struct DCP_FW_NAME(dcp_map_reg_resp) dcpep_cb_map_reg(struct apple_dcp *d
 		return (struct DCP_FW_NAME(dcp_map_reg_resp)){ .ret = 1 };
 	} else {
 		struct resource *rsrc = dcp->disp_registers[req->index];
+
+		dev_info(dcp->dev, "map_reg[%u] = %pa len %llu (have %u)\n",
+			 req->index, &rsrc->start,
+			 (u64)resource_size(rsrc), dcp->nr_disp_registers);
 #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
 		dma_addr_t dva = dma_map_resource(dcp->dev, rsrc->start, resource_size(rsrc),
 						  DMA_BIDIRECTIONAL, 0);
@@ -492,6 +501,9 @@ static struct DCP_FW_NAME(dcp_map_reg_resp) dcpep_cb_map_reg(struct apple_dcp *d
 static struct dcp_read_edt_data_resp
 dcpep_cb_read_edt_data(struct apple_dcp *dcp, struct dcp_read_edt_data_req *req)
 {
+	dev_info(dcp->dev, "read_edt_data(key='%.*s' count=%u) -> echo %u\n",
+		 (int)sizeof(req->key), req->key, req->count, req->value[0]);
+
 	return (struct dcp_read_edt_data_resp){
 		.value[0] = req->value[0],
 		.ret = 0,
@@ -1231,6 +1243,22 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 		.color_mode_id = mode->color_mode_id,
 		.timing_mode_id = mode->timing_mode_id
 	};
+
+	/*
+	 * The timing table the DCP builds for a Studio Display over a
+	 * Thunderbolt tunnel stops at id 40 (2560x2880, one tile) and has no
+	 * 5K entry, while macOS on the same machine drives
+	 *   set_digital_out_mode(colorID 48, timingID 43) -> 5120x2880 DSC=YES
+	 * The id may still exist inside the firmware, so allow asking for it
+	 * directly. -1 leaves the parsed value alone.
+	 */
+	if (dcp_force_timing_id >= 0)
+		dcp->mode.timing_mode_id = dcp_force_timing_id;
+	if (dcp_force_color_id >= 0)
+		dcp->mode.color_mode_id = dcp_force_color_id;
+	if (dcp_force_timing_id >= 0 || dcp_force_color_id >= 0)
+		dev_info(dcp->dev, "forcing color:%u timing:%u\n",
+			 dcp->mode.color_mode_id, dcp->mode.timing_mode_id);
 
 	/* Keep track of suspected vrr modes */
 	dcp->use_timestamps = mode->vrr;

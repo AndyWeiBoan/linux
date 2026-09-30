@@ -38,7 +38,12 @@ static void dcpavserv_teardown(struct apple_epic_service *service)
 	struct apple_dcp *dcp = service->ep->dcp;
 	service->enabled = false;
 
-	if (dcp->dcpavserv.enabled) {
+	/*
+	 * Only clear the driver's handle if this is the service it is actually
+	 * holding. The AV endpoint sees several services come and go per
+	 * connect, and tearing any of them down used to wipe the live one.
+	 */
+	if (dcp->dcpavserv.enabled && dcp->dcpavserv.service == service) {
 		dcp->dcpavserv.enabled = false;
 		dcp->dcpavserv.service = NULL;
 		service->cookie = NULL;

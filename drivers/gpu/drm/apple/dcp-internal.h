@@ -115,6 +115,10 @@ struct apple_dcp_hw_data {
 
 /* TODO: move IOMFB members to its own struct */
 extern int dcp_frequency_override;
+extern int dcp_force_timing_id;
+extern bool dcp_add_5k_mode;
+extern bool dcp_allow_virtual_modes;
+extern int dcp_force_color_id;
 
 struct apple_dcp {
 	struct device *dev;
