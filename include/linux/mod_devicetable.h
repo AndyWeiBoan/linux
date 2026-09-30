@@ -787,6 +787,12 @@ struct fsl_mc_device_id {
 	const char obj_type[16];
 };
 
+/*
+ * The Thunderbolt subsystem here comes from a tree where these moved to
+ * <linux/device-id/tb.h>; skip this copy when that header got there first.
+ */
+#ifndef LINUX_DEVICE_ID_TB_H
+
 /**
  * struct tb_service_id - Thunderbolt service identifiers
  * @match_flags: Flags used to match the structure
@@ -813,6 +819,8 @@ struct tb_service_id {
 #define TBSVC_MATCH_PROTOCOL_ID		0x0002
 #define TBSVC_MATCH_PROTOCOL_VERSION	0x0004
 #define TBSVC_MATCH_PROTOCOL_REVISION	0x0008
+
+#endif /* ifndef LINUX_DEVICE_ID_TB_H */
 
 /* USB Type-C Alternate Modes */
 
