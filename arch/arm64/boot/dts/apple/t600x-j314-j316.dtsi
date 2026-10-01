@@ -295,10 +295,6 @@
 			power-role = "dual";
 			data-role = "dual";
 
-#ifdef ENABLE_DCPEXT_TYPEC
-			/* see the Left Front connector */
-			displayport = <&dcpext0>;
-#endif
 
 			ports {
 				#address-cells = <1>;
@@ -334,15 +330,13 @@
 
 #ifdef ENABLE_DCPEXT_TYPEC
 			/*
-			 * dcpext0, not dcpext1: this is the display controller
-			 * routed through atcphy1's crossbar to DP IN0 above,
-			 * and the one the DP tunnel's host adapter is fed from.
-			 * Pointing at dcpext1 makes the out-of-band hotplug
-			 * event land on a controller that is not driving this
-			 * port, and the DPTX firmware answers it with
-			 * DEVICE_NOT_RESPONDING / DEVICE_NOT_STARTED.
+			 * The display controller that drives this port's PHY,
+			 * for a display on plain DisplayPort altmode. One
+			 * arriving over a Thunderbolt tunnel does not use this
+			 * path at all - see apple,dp-tunnel-sink on the CIO
+			 * blocks, which names the controller for that instead.
 			 */
-			displayport = <&dcpext0>;
+			displayport = <&dcpext1>;
 #endif
 
 			ports {
@@ -377,10 +371,6 @@
 			power-role = "dual";
 			data-role = "dual";
 
-#ifdef ENABLE_DCPEXT_TYPEC
-			/* see the Left Front connector */
-			displayport = <&dcpext0>;
-#endif
 
 			ports {
 				#address-cells = <1>;
@@ -948,4 +938,22 @@
 
 &atcphy2_xbar {
 	status = "okay";
+};
+
+/*
+ * Where a display arriving over a Thunderbolt tunnel on each port is driven
+ * from. Deliberately not the connector's "displayport": that one names the
+ * controller which drives the port's Type-C PHY for a plain DisplayPort
+ * altmode display, and both kinds have to keep working, including hotplug.
+ */
+&usb4_0_acio {
+	apple,dp-tunnel-sink = <&dcpext0>;
+};
+
+&usb4_1_acio {
+	apple,dp-tunnel-sink = <&dcpext0>;
+};
+
+&usb4_2_acio {
+	apple,dp-tunnel-sink = <&dcpext0>;
 };

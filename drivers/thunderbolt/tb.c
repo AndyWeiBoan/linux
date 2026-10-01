@@ -123,7 +123,7 @@ static void tb_dp_tunnel_active(struct tb_tunnel *tunnel);
 static struct fwnode_handle *tb_dp_host_connector_fwnode(struct tb *tb,
 							u32 *atc_index)
 {
-	struct fwnode_handle *host, *ep, *connector, *dp = NULL;
+	struct fwnode_handle *host, *sink;
 
 	if (!tb->nhi || !tb->nhi->dev || !tb->nhi->dev->parent)
 		return NULL;
@@ -140,20 +140,18 @@ static struct fwnode_handle *tb_dp_host_connector_fwnode(struct tb *tb,
 	    fwnode_property_read_u32(host, "apple,atc-index", atc_index))
 		return NULL;
 
-	fwnode_graph_for_each_endpoint(host, ep) {
-		connector = fwnode_graph_get_remote_port_parent(ep);
-		if (!connector)
-			continue;
-		dp = fwnode_find_reference(connector, "displayport", 0);
-		fwnode_handle_put(connector);
-		if (!IS_ERR(dp)) {
-			fwnode_handle_put(ep);
-			return dp;
-		}
-		dp = NULL;
-	}
+	/*
+	 * The controller that drives a tunnelled display here. It is named on
+	 * the host block rather than taken from the Type-C connector, because
+	 * the connector names the one that drives its PHY for a display on
+	 * plain DisplayPort altmode - a different controller doing a different
+	 * job, which has to keep working at the same time.
+	 */
+	sink = fwnode_find_reference(host, "apple,dp-tunnel-sink", 0);
+	if (IS_ERR(sink))
+		return NULL;
 
-	return NULL;
+	return sink;
 }
 
 /**

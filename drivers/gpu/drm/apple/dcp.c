@@ -539,7 +539,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	 * configureDPTunnelMode writes and enabling the crossbar clocks has to
 	 * happen right here.
 	 */
-	if (!dcp->phy && dcp->xbar && dcp_finish_dp_tunnel) {
+	if (!dcp->phy && dcp->xbar && dcp->tunnel_pending && dcp_finish_dp_tunnel) {
 		int fret = apple_dpxbar_finish_dp_tunnel(dcp->xbar);
 
 		if (fret)
@@ -582,6 +582,11 @@ static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
 		dptxport_release_display(dcp->dptxport[port].service);
 		dcp->dptxport[port].connected = false;
 	}
+	/*
+	 * Whatever shows up next has to say for itself that it comes over a
+	 * tunnel, or it gets the plain DisplayPort treatment.
+	 */
+	dcp->tunnel_pending = false;
 	mutex_unlock(&dcp->hpd_mutex);
 
 	return 0;
@@ -721,6 +726,7 @@ int dcp_dptx_select_atc(struct platform_device *pdev, unsigned int atc)
 		dcp->xbar = dcp->xbars[atc];
 	}
 	dcp->dptx_phy = atc;
+	dcp->tunnel_pending = true;
 
 	dev_info(dcp->dev, "tunnelled display is on ATC %u\n", atc);
 	return 0;

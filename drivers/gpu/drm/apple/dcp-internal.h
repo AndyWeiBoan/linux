@@ -276,6 +276,13 @@ struct apple_dcp {
 	struct mux_control *xbars[DCP_MAX_ATC];
 	unsigned int n_xbars;
 	struct mux_control *xbar;
+	/*
+	 * Set by whoever brought a Thunderbolt DP tunnel up, cleared when the
+	 * display goes away. A display on plain DisplayPort altmode arrives
+	 * through the same connect, and doing the tunnel bring-up for it
+	 * touches an ACIO block that is not powered.
+	 */
+	bool tunnel_pending;
 	struct typec_mux *typec_mux;
 
 	struct gpio_desc *hdmi_hpd;
