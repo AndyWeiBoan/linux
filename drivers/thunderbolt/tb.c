@@ -12,6 +12,8 @@
 #include <linux/delay.h>
 #include <linux/pm_runtime.h>
 #include <linux/platform_data/x86/apple.h>
+#include <linux/property.h>
+#include <drm/drm_connector.h>
 
 #include "tb.h"
 #include "tb_regs.h"
@@ -92,6 +94,86 @@ static void tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
 static void tb_queue_dp_bandwidth_request(struct tb *tb, u64 route, u8 port,
 					  int retry, unsigned long delay);
 static void tb_dp_tunnel_active(struct tb_tunnel *tunnel);
+
+/**
+ * tb_dp_host_connector_fwnode() - display behind this domain's DP IN adapter
+ * @tb: domain the tunnel belongs to
+ *
+ * On Apple silicon the host side of a DP tunnel is an ACIO block whose device
+ * tree node is wired, through the OF graph, to the Type-C connector it serves;
+ * the connector in turn points at the display controller that feeds it. The
+ * display controller registers its DRM connector under its own fwnode, so walk
+ * that chain to find the fwnode an out-of-band hotplug event has to be reported
+ * on.
+ *
+ * Returns NULL on anything that is not wired up this way, which is every
+ * non-Apple host - there the Type-C DisplayPort altmode driver reports these
+ * events instead.
+ */
+static struct fwnode_handle *tb_dp_host_connector_fwnode(struct tb *tb)
+{
+	struct fwnode_handle *host, *ep, *connector, *dp = NULL;
+
+	if (!tb->nhi || !tb->nhi->dev || !tb->nhi->dev->parent)
+		return NULL;
+
+	host = dev_fwnode(tb->nhi->dev->parent);
+	if (!host)
+		return NULL;
+
+	fwnode_graph_for_each_endpoint(host, ep) {
+		connector = fwnode_graph_get_remote_port_parent(ep);
+		if (!connector)
+			continue;
+		dp = fwnode_find_reference(connector, "displayport", 0);
+		fwnode_handle_put(connector);
+		if (!IS_ERR(dp)) {
+			fwnode_handle_put(ep);
+			return dp;
+		}
+		dp = NULL;
+	}
+
+	return NULL;
+}
+
+/**
+ * tb_dp_oob_hotplug() - tell the display controller about a tunnelled display
+ * @tunnel: the DP tunnel that just came up or is going away
+ * @status: what to report
+ *
+ * A display reached over a DP tunnel never asserts HPD on the Type-C pins, so
+ * the USB-PD controller cannot report it and the display controller would never
+ * learn that it has something to drive.
+ *
+ * Only tunnels whose DP IN adapter sits on the host router are reported: those
+ * are the ones this domain's display controller is wired to.
+ */
+static void tb_dp_oob_hotplug(struct tb_tunnel *tunnel,
+			      enum drm_connector_status status)
+{
+	struct fwnode_handle *fwnode;
+
+	/*
+	 * Nothing to report to when DRM cannot be called from here, and USB4
+	 * must not start depending on it just for this.
+	 */
+	if (!IS_REACHABLE(CONFIG_DRM))
+		return;
+
+	if (tunnel->type != TB_TUNNEL_DP || !tunnel->src_port ||
+	    tb_route(tunnel->src_port->sw))
+		return;
+
+	fwnode = tb_dp_host_connector_fwnode(tunnel->tb);
+	if (!fwnode)
+		return;
+
+	tb_tunnel_dbg(tunnel, "reporting out-of-band hotplug: %d\n", status);
+	drm_connector_oob_hotplug_event(fwnode, status);
+	fwnode_handle_put(fwnode);
+}
+
 
 static void tb_queue_hotplug(struct tb *tb, u64 route, u8 port, bool unplug)
 {
@@ -1740,6 +1822,7 @@ static void tb_deactivate_and_free_tunnel(struct tb_tunnel *tunnel)
 
 	switch (tunnel->type) {
 	case TB_TUNNEL_DP:
+		tb_dp_oob_hotplug(tunnel, connector_status_disconnected);
 		tb_detach_bandwidth_group(src_port);
 		/*
 		 * In case of DP tunnel make sure the DP IN resource is
@@ -1930,6 +2013,12 @@ static void tb_dp_tunnel_active(struct tb_tunnel *tunnel)
 		int consumed_up, consumed_down, ret;
 
 		tb_tunnel_dbg(tunnel, "DPRX capabilities read completed\n");
+
+		/*
+		 * The display is only reachable now, and nothing on the
+		 * Type-C side can tell the display controller that.
+		 */
+		tb_dp_oob_hotplug(tunnel, connector_status_connected);
 
 		/* If fail reading tunnel's consumed bandwidth, tear it down */
 		ret = tb_tunnel_consumed_bandwidth(tunnel, &consumed_up,
