@@ -2014,12 +2014,6 @@ static void tb_dp_tunnel_active(struct tb_tunnel *tunnel)
 
 		tb_tunnel_dbg(tunnel, "DPRX capabilities read completed\n");
 
-		/*
-		 * The display is only reachable now, and nothing on the
-		 * Type-C side can tell the display controller that.
-		 */
-		tb_dp_oob_hotplug(tunnel, connector_status_connected);
-
 		/* If fail reading tunnel's consumed bandwidth, tear it down */
 		ret = tb_tunnel_consumed_bandwidth(tunnel, &consumed_up,
 						   &consumed_down);
@@ -2143,6 +2137,14 @@ static void tb_tunnel_one_dp(struct tb *tb, struct tb_port *in,
 		list_del(&tunnel->list);
 		goto err_free;
 	}
+
+	/*
+	 * Report as soon as the paths carry traffic, not when the DPRX read
+	 * finishes: on a host whose DP source only starts driving the link
+	 * once it has been told about the display, that read cannot complete
+	 * until this event has been delivered.
+	 */
+	tb_dp_oob_hotplug(tunnel, connector_status_connected);
 
 	return;
 
