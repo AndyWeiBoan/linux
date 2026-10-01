@@ -14,6 +14,16 @@
 #include <linux/platform_data/x86/apple.h>
 #include <linux/property.h>
 #include <drm/drm_connector.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
+
+/*
+ * Looked up at run time, never linked against: a display driver that can
+ * drive a tunnelled display on more than one port offers this so it can be
+ * told which one, and USB4 must not grow a dependency on one for it.
+ */
+int dcp_dptx_select_atc(struct platform_device *pdev, unsigned int atc);
 
 #include "tb.h"
 #include "tb_regs.h"
@@ -110,7 +120,8 @@ static void tb_dp_tunnel_active(struct tb_tunnel *tunnel);
  * non-Apple host - there the Type-C DisplayPort altmode driver reports these
  * events instead.
  */
-static struct fwnode_handle *tb_dp_host_connector_fwnode(struct tb *tb)
+static struct fwnode_handle *tb_dp_host_connector_fwnode(struct tb *tb,
+							u32 *atc_index)
 {
 	struct fwnode_handle *host, *ep, *connector, *dp = NULL;
 
@@ -119,6 +130,14 @@ static struct fwnode_handle *tb_dp_host_connector_fwnode(struct tb *tb)
 
 	host = dev_fwnode(tb->nhi->dev->parent);
 	if (!host)
+		return NULL;
+
+	/*
+	 * Which Type-C port this domain serves. The display controller needs
+	 * it to pick that port's crossbar and DP transmitter.
+	 */
+	if (atc_index &&
+	    fwnode_property_read_u32(host, "apple,atc-index", atc_index))
 		return NULL;
 
 	fwnode_graph_for_each_endpoint(host, ep) {
@@ -153,6 +172,7 @@ static void tb_dp_oob_hotplug(struct tb_tunnel *tunnel,
 			      enum drm_connector_status status)
 {
 	struct fwnode_handle *fwnode;
+	u32 atc = 0;
 
 	/*
 	 * Nothing to report to when DRM cannot be called from here, and USB4
@@ -165,11 +185,36 @@ static void tb_dp_oob_hotplug(struct tb_tunnel *tunnel,
 	    tb_route(tunnel->src_port->sw))
 		return;
 
-	fwnode = tb_dp_host_connector_fwnode(tunnel->tb);
+	fwnode = tb_dp_host_connector_fwnode(tunnel->tb, &atc);
 	if (!fwnode)
 		return;
 
-	tb_tunnel_dbg(tunnel, "reporting out-of-band hotplug: %d\n", status);
+	/*
+	 * Tell the display controller which port it is about to drive before
+	 * reporting the display, so the connect that follows routes through
+	 * the right crossbar. A controller that only ever serves one port
+	 * does not export this and does not need telling.
+	 */
+	if (status == connector_status_connected) {
+		struct platform_device *pdev;
+		struct device_node *np;
+
+		np = to_of_node(fwnode);
+		pdev = np ? of_find_device_by_node(np) : NULL;
+		if (pdev) {
+			int (*sel)(struct platform_device *, unsigned int);
+
+			sel = symbol_get(dcp_dptx_select_atc);
+			if (sel) {
+				sel(pdev, atc);
+				symbol_put(dcp_dptx_select_atc);
+			}
+			put_device(&pdev->dev);
+		}
+	}
+
+	tb_tunnel_dbg(tunnel, "reporting out-of-band hotplug: %d (ATC %u)\n",
+		      status, atc);
 	drm_connector_oob_hotplug_event(fwnode, status);
 	fwnode_handle_put(fwnode);
 }

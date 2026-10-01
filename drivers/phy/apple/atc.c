@@ -2755,14 +2755,22 @@ MODULE_DEVICE_TABLE(of, atcphy_match);
  * reaching the same address with a private ioremap() from the crossbar driver
  * panics the machine with an SError.
  */
-int apple_atcphy_dp_tunnel_pclk(const char *name)
+/**
+ * apple_atcphy_dp_tunnel_pclk() - bring a PHY's DP tunnel pixel clock up
+ * @np: device tree node of the PHY to program, or NULL for the first one
+ *
+ * Matching on the node rather than on a device name lets the caller name the
+ * PHY the way the device tree already wires it to them, which is what makes
+ * this work for more than one Type-C port.
+ */
+int apple_atcphy_dp_tunnel_pclk(struct device_node *np)
 {
 	struct apple_atcphy *atcphy;
 	int ret = -ENODEV;
 
 	mutex_lock(&atcphy_list_lock);
 	list_for_each_entry(atcphy, &atcphy_list, list) {
-		if (name && strcmp(dev_name(atcphy->dev), name))
+		if (np && atcphy->dev->of_node != np)
 			continue;
 		mutex_lock(&atcphy->lock);
 		atcphy_enable_dp_tunnel_pclk(atcphy);

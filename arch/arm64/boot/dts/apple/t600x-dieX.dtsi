@@ -482,6 +482,10 @@
 
 	DIE_NODE(usb4_0_acio): cio@701ac0000 {
 		compatible = "apple,t6000-usb4-acio", "apple,t8103-usb4-acio";
+		/* Which Type-C port this block serves, matching atc0-* in Apple's
+		 * own device tree. Whatever arrives over a tunnel here has to be
+		 * routed through that port's display crossbar. */
+		apple,atc-index = <0>;
 		reg = <0x7 0x01ac0000 0x0 0xc000>,
 			<0x7 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -613,7 +617,18 @@
 
 	DIE_NODE(atcphy0_xbar): mux@70304c000 {
 		compatible = "apple,t6000-display-crossbar";
-		reg = <0x7 0x0304c000 0x0 0x4000>;
+		/*
+		 * The two Thunderbolt DP IN adapters' SoC-side blocks, which
+		 * the driver arms when bringing a tunnelled display up. The
+		 * offsets are the same on every ATC instance; the addresses
+		 * are the ones Apple's own device tree carries for
+		 * atc0-dpin0 / atc0-dpin1 on this SoC.
+		 */
+		reg = <0x7 0x0304c000 0x0 0x4000>,
+		      <0x7 0x01e50000 0x0 0x4000>,
+		      <0x7 0x01e58000 0x0 0x4000>;
+		reg-names = "xbar", "dpin0", "dpin1";
+		apple,atc-phy = <&DIE_NODE(atcphy0)>;
 		#mux-control-cells = <1>;
 		power-domains = <&DIE_NODE(ps_atc0_usb)>;
 		status = "disabled";
@@ -635,6 +650,10 @@
 
 	DIE_NODE(usb4_1_acio): cio@b01ac0000 {
 		compatible = "apple,t6000-usb4-acio", "apple,t8103-usb4-acio";
+		/* Which Type-C port this block serves, matching atc1-* in Apple's
+		 * own device tree. Whatever arrives over a tunnel here has to be
+		 * routed through that port's display crossbar. */
+		apple,atc-index = <1>;
 		reg = <0xb 0x01ac0000 0x0 0xc000>,
 			<0xb 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -785,6 +804,7 @@
 		      <0xb 0x01e50000 0x0 0x4000>,
 		      <0xb 0x01e58000 0x0 0x4000>;
 		reg-names = "xbar", "dpin0", "dpin1";
+		apple,atc-phy = <&DIE_NODE(atcphy1)>;
 		#mux-control-cells = <1>;
 		power-domains = <&DIE_NODE(ps_atc1_usb)>;
 		status = "disabled";
@@ -806,6 +826,10 @@
 
 	DIE_NODE(usb4_2_acio): cio@f01ac0000 {
 		compatible = "apple,t6000-usb4-acio", "apple,t8103-usb4-acio";
+		/* Which Type-C port this block serves, matching atc2-* in Apple's
+		 * own device tree. Whatever arrives over a tunnel here has to be
+		 * routed through that port's display crossbar. */
+		apple,atc-index = <2>;
 		reg = <0xf 0x01ac0000 0x0 0xc000>,
 			<0xf 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -937,7 +961,18 @@
 
 	DIE_NODE(atcphy2_xbar): mux@f0304c000 {
 		compatible = "apple,t6000-display-crossbar";
-		reg = <0xf 0x0304c000 0x0 0x4000>;
+		/*
+		 * The two Thunderbolt DP IN adapters' SoC-side blocks, which
+		 * the driver arms when bringing a tunnelled display up. The
+		 * offsets are the same on every ATC instance; the addresses
+		 * are the ones Apple's own device tree carries for
+		 * atc2-dpin0 / atc2-dpin1 on this SoC.
+		 */
+		reg = <0xf 0x0304c000 0x0 0x4000>,
+		      <0xf 0x01e50000 0x0 0x4000>,
+		      <0xf 0x01e58000 0x0 0x4000>;
+		reg-names = "xbar", "dpin0", "dpin1";
+		apple,atc-phy = <&DIE_NODE(atcphy2)>;
 		#mux-control-cells = <1>;
 		power-domains = <&DIE_NODE(ps_atc2_usb)>;
 		status = "disabled";
@@ -959,6 +994,10 @@
 
 	DIE_NODE(usb4_3_acio): cio@1301ac0000 {
 		compatible = "apple,t6000-usb4-acio", "apple,t8103-usb4-acio";
+		/* Which Type-C port this block serves, matching atc3-* in Apple's
+		 * own device tree. Whatever arrives over a tunnel here has to be
+		 * routed through that port's display crossbar. */
+		apple,atc-index = <3>;
 		reg = <0x13 0x01ac0000 0x0 0xc000>,
 			<0x13 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -1091,6 +1130,7 @@
 	DIE_NODE(atcphy3_xbar): mux@130304c000 {
 		compatible = "apple,t6000-display-crossbar";
 		reg = <0x13 0x0304c000 0x0 0x4000>;
+		apple,atc-phy = <&DIE_NODE(atcphy3)>;
 		#mux-control-cells = <1>;
 		power-domains = <&DIE_NODE(ps_atc3_usb)>;
 		status = "disabled";

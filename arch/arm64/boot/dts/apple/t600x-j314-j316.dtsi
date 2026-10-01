@@ -139,8 +139,16 @@
 	 * untrained (no EDID, no modes at all), and the ACIO firmware arms
 	 * dpin0 (its MODE reads 5) while dpin1 stays all zeroes.
 	 */
-	mux-controls = <&atcphy1_xbar 1>;	/* 1 = MUX_DPIN0 */
-	mux-control-names = "dp-xbar";
+	/*
+	 * One crossbar per Type-C port, named after the ATC instance it
+	 * belongs to. A tunnelled display can show up on any of them, so the
+	 * driver picks the one the Thunderbolt domain that carries it sits
+	 * behind; mux control 1 is MUX_DPIN0 on each.
+	 */
+	mux-controls = <&atcphy0_xbar 1>,
+		       <&atcphy1_xbar 1>,
+		       <&atcphy2_xbar 1>;
+	mux-control-names = "dp-xbar-atc0", "dp-xbar-atc1", "dp-xbar-atc2";
 	mux-index = <0>;			/* source = dispext0, like macOS */
 	apple,dptx-phy = <1>;
 };
@@ -287,6 +295,11 @@
 			power-role = "dual";
 			data-role = "dual";
 
+#ifdef ENABLE_DCPEXT_TYPEC
+			/* see the Left Front connector */
+			displayport = <&dcpext0>;
+#endif
+
 			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
@@ -363,6 +376,11 @@
 			label = "USB-C Right";
 			power-role = "dual";
 			data-role = "dual";
+
+#ifdef ENABLE_DCPEXT_TYPEC
+			/* see the Left Front connector */
+			displayport = <&dcpext0>;
+#endif
 
 			ports {
 				#address-cells = <1>;
@@ -919,3 +937,15 @@
 #include "hwmon-common.dtsi"
 #include "hwmon-fan-dual.dtsi"
 #include "hwmon-laptop.dtsi"
+
+/*
+ * The other two Type-C ports' crossbars. A tunnelled display can arrive on
+ * any port, and dcpext0 holds a mux control for each of them.
+ */
+&atcphy0_xbar {
+	status = "okay";
+};
+
+&atcphy2_xbar {
+	status = "okay";
+};

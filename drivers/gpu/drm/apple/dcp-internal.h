@@ -120,6 +120,9 @@ extern bool dcp_add_5k_mode;
 extern bool dcp_allow_virtual_modes;
 extern int dcp_force_color_id;
 
+/* Type-C ports a tunnelled display can arrive on */
+#define DCP_MAX_ATC 3
+
 struct apple_dcp {
 	struct device *dev;
 	struct platform_device *piodma;
@@ -264,6 +267,14 @@ struct apple_dcp {
 
 	/* these fields are output port specific */
 	struct phy *phy;
+	/*
+	 * A tunnelled display can arrive on any Type-C port, so hold one
+	 * crossbar per port and point @xbar at whichever one the display
+	 * showed up behind. @xbar is also what tells the rest of the driver
+	 * "this DCP drives a tunnel", so it stays set once any are present.
+	 */
+	struct mux_control *xbars[DCP_MAX_ATC];
+	unsigned int n_xbars;
 	struct mux_control *xbar;
 	struct typec_mux *typec_mux;
 

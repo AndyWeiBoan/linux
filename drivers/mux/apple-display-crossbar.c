@@ -114,16 +114,18 @@ module_param(tunable_override, int, 0644);
  * this driver could not reach - the phy driver owns the region. Map it
  * separately here for the combined bring-up below; 0 disables the step.
  */
-int apple_atcphy_dp_tunnel_pclk(const char *name);
+int apple_atcphy_dp_tunnel_pclk(struct device_node *np);
 
 /*
  * Which Type-C PHY to run configureDPTunnelMode on. There is one per ATC port
  * and picking "the first one" got 703000000.phy, which is a different port and
  * sits idle - its DP_CTRL0 reads 0. The tunnelled display on j314s is on atc1.
  */
-static char *phy_name = "b03000000.phy";
-module_param(phy_name, charp, 0644);
-MODULE_PARM_DESC(phy_name, "Device name of the Type-C PHY to program");
+/*
+ * Which Type-C PHY this crossbar feeds comes from the device tree now; the
+ * old module parameter could only ever name one, which is wrong as soon as a
+ * tunnelled display can arrive on more than one port.
+ */
 
 static bool phy_dp_ctrl0;
 module_param(phy_dp_ctrl0, bool, 0644);
@@ -177,6 +179,8 @@ struct apple_dpxbar {
 	/* optional, indexed by MUX_DPIN0 / MUX_DPIN1 */
 	void __iomem *dpin[MUX_MAX];
 	int selected_dispext[MUX_MAX];
+	/* the Type-C PHY this crossbar's output goes out through */
+	struct device_node *phy_node;
 	spinlock_t lock;
 };
 
@@ -613,10 +617,10 @@ static int apple_dpxbar_dpin_bringup(struct apple_dpxbar *dpxbar,
 
 	if (phy_dp_ctrl0)
 		{
-		int pret = apple_atcphy_dp_tunnel_pclk(phy_name);
+		int pret = apple_atcphy_dp_tunnel_pclk(dpxbar->phy_node);
 
 		if (pret)
-		dev_warn(dpxbar->dev, "PHY %s: %d\n", phy_name, pret);
+		dev_warn(dpxbar->dev, "PHY %pOFn: %d\n", dpxbar->phy_node, pret);
 	}
 
 	spin_lock_irqsave(&dpxbar->lock, flags);
@@ -780,6 +784,14 @@ static int apple_dpxbar_probe(struct platform_device *pdev)
 		dpxbar->dpin[i] = p;
 		dev_info(dev, "%s block available\n", name);
 	}
+
+	/*
+	 * Optional: without it the PHY step is skipped, which is what every
+	 * crossbar that never carries a tunnel wants anyway.
+	 */
+	dpxbar->phy_node = of_parse_phandle(dev->of_node, "apple,atc-phy", 0);
+	if (dpxbar->phy_node)
+		dev_info(dev, "feeds PHY %pOF\n", dpxbar->phy_node);
 
 	if (!of_device_is_compatible(dev->of_node, "apple,t6020-display-crossbar")) {
 		readl(dpxbar->regs + UNK_TUNABLE);

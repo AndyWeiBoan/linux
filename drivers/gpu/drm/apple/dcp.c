@@ -697,6 +697,36 @@ static void dcp_autoconnect_work(struct work_struct *work)
 		schedule_delayed_work(&dcp->autoconnect_wq, HZ);
 }
 
+/**
+ * dcp_dptx_select_atc() - point this DCP at the port a tunnel arrived on
+ * @pdev: the display controller
+ * @atc: index of the Type-C port, matching the crossbar order in the DT
+ *
+ * A tunnelled display can show up on any Type-C port, and which one decides
+ * both the display crossbar to route through and the DP transmitter the DCP
+ * firmware has to drive. Whoever brings the tunnel up knows that; call this
+ * before reporting the display so the connect that follows uses the right one.
+ */
+int dcp_dptx_select_atc(struct platform_device *pdev, unsigned int atc)
+{
+	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+
+	if (!dcp)
+		return -ENODEV;
+	if (atc >= dcp->n_xbars || !dcp->xbars[atc])
+		return -EINVAL;
+
+	if (dcp->xbar != dcp->xbars[atc]) {
+		mux_control_deselect(dcp->xbar);
+		dcp->xbar = dcp->xbars[atc];
+	}
+	dcp->dptx_phy = atc;
+
+	dev_info(dcp->dev, "tunnelled display is on ATC %u\n", atc);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dcp_dptx_select_atc);
+
 int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port)
 {
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
@@ -1545,11 +1575,37 @@ static int dcp_platform_probe(struct platform_device *pdev)
 	if (!of_property_read_u32(dev->of_node, "mux-index", &mux_index)) {
 		int ret;
 
-		dcp->xbar = devm_mux_control_get(dev, "dp-xbar");
-		if (IS_ERR(dcp->xbar)) {
-			dev_err(dev, "Failed to get dp-xbar: %ld\n", PTR_ERR(dcp->xbar));
-			return PTR_ERR(dcp->xbar);
+		/*
+		 * Either one crossbar under the old "dp-xbar" name, or one per
+		 * Type-C port a tunnelled display can arrive on. Start out on
+		 * the first one; dcp_dptx_select_atc() re-points us when the
+		 * Thunderbolt side says where the display actually turned up.
+		 */
+		dcp->xbars[0] = devm_mux_control_get(dev, "dp-xbar");
+		if (!IS_ERR(dcp->xbars[0])) {
+			dcp->n_xbars = 1;
+		} else {
+			unsigned int i;
+
+			for (i = 0; i < DCP_MAX_ATC; i++) {
+				char name[16];
+				struct mux_control *m;
+
+				snprintf(name, sizeof(name), "dp-xbar-atc%u", i);
+				m = devm_mux_control_get(dev, name);
+				if (IS_ERR(m))
+					break;
+				dcp->xbars[i] = m;
+				dcp->n_xbars = i + 1;
+			}
 		}
+		if (!dcp->n_xbars) {
+			dev_err(dev, "Failed to get any dp-xbar mux control\n");
+			return -ENODEV;
+		}
+		dev_info(dev, "%u display crossbar(s) available\n", dcp->n_xbars);
+
+		dcp->xbar = dcp->xbars[0];
 		ret = mux_control_select(dcp->xbar, mux_index);
 		if (ret)
 			dev_warn(dev, "mux_control_select failed: %d\n", ret);
