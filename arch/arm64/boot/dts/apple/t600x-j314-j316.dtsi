@@ -320,8 +320,16 @@
 			data-role = "dual";
 
 #ifdef ENABLE_DCPEXT_TYPEC
-			/* hacks */
-			displayport = <&dcpext1>;
+			/*
+			 * dcpext0, not dcpext1: this is the display controller
+			 * routed through atcphy1's crossbar to DP IN0 above,
+			 * and the one the DP tunnel's host adapter is fed from.
+			 * Pointing at dcpext1 makes the out-of-band hotplug
+			 * event land on a controller that is not driving this
+			 * port, and the DPTX firmware answers it with
+			 * DEVICE_NOT_RESPONDING / DEVICE_NOT_STARTED.
+			 */
+			displayport = <&dcpext0>;
 #endif
 
 			ports {
