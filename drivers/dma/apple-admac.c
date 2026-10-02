@@ -149,6 +149,9 @@ struct admac_tx {
 	size_t submitted_pos;
 	size_t reclaimed_pos;
 
+	size_t last_pos;
+	bool last_pos_valid;
+
 	struct list_head node;
 };
 
@@ -282,6 +285,8 @@ static struct dma_async_tx_descriptor *admac_prep_dma_cyclic(
 
 	adtx->submitted_pos = 0;
 	adtx->reclaimed_pos = 0;
+	adtx->last_pos = 0;
+	adtx->last_pos_valid = false;
 
 	dma_async_tx_descriptor_init(&adtx->tx, chan);
 	adtx->tx.tx_submit = admac_tx_submit;
@@ -350,6 +355,8 @@ static int admac_ring_noccupied_slots(int ringval)
 
 /*
  * Read from hardware the residue of a cyclic dmaengine transaction.
+ *
+ * Must be called with adchan->lock held.
  */
 static u32 admac_cyclic_read_residue(struct admac_data *ad, int channo,
 				     struct admac_tx *adtx)
@@ -375,9 +382,37 @@ static u32 admac_cyclic_read_residue(struct admac_data *ad, int channo,
 		nreports = admac_ring_noccupied_slots(ring2);
 	}
 
-	pos = adtx->reclaimed_pos + adtx->period_len * (nreports + 1) - residue2;
+	pos = (adtx->reclaimed_pos + adtx->period_len * (nreports + 1) - residue2)
+	      % adtx->buf_len;
 
-	return adtx->buf_len - pos % adtx->buf_len;
+	/*
+	 * The reads above are not atomic with respect to the controller
+	 * advancing through the descriptor ring, so the position computed
+	 * from them can occasionally come out a little behind the one
+	 * reported by the previous call.
+	 *
+	 * ALSA treats a backward step as the ring buffer having wrapped: it
+	 * adds a whole buffer to its hardware pointer, sees that as a
+	 * buffer-sized underrun, and restarts the PCM - which is audible as
+	 * a pop.  Hold the previous position over such a step instead.
+	 *
+	 * The error is a whole number of periods, because that is what both
+	 * terms above are counted in, and the report ring holds four entries,
+	 * so it cannot exceed four periods. Allow twice that and no more: in a
+	 * ring buffer a step forward of buf_len - n looks exactly like a step
+	 * back of n, so a generous bound would mistake a long gap between
+	 * calls for a step backwards and pin the position there.
+	 */
+	if (adtx->last_pos_valid) {
+		size_t back = (adtx->last_pos + adtx->buf_len - pos) % adtx->buf_len;
+
+		if (back > 0 && back <= 8 * adtx->period_len)
+			pos = adtx->last_pos;
+	}
+	adtx->last_pos = pos;
+	adtx->last_pos_valid = true;
+
+	return adtx->buf_len - pos;
 }
 
 static enum dma_status admac_tx_status(struct dma_chan *chan, dma_cookie_t cookie,
@@ -511,6 +546,17 @@ static int admac_pause(struct dma_chan *chan)
 static int admac_resume(struct dma_chan *chan)
 {
 	struct admac_chan *adchan = to_admac_chan(chan);
+	unsigned long flags;
+
+	/*
+	 * The position remembered across calls says nothing about where the
+	 * channel picks up again, and holding a stale one back would pin the
+	 * reported position until the ring caught up with it.
+	 */
+	spin_lock_irqsave(&adchan->lock, flags);
+	if (adchan->current_tx)
+		adchan->current_tx->last_pos_valid = false;
+	spin_unlock_irqrestore(&adchan->lock, flags);
 
 	admac_start_chan(adchan);
 
