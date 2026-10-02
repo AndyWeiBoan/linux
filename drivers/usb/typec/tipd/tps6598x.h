@@ -370,6 +370,9 @@ struct cd321x {
 	struct typec_mux *mux;
 	struct typec_mux_state state;
 	struct typec_thunderbolt_switch *tbt_switch;
+	/* which Type-C port this is, for a display controller serving several */
+	u32 atc_index;
+	bool has_atc_index;
 
 	struct cd321x_status update_status;
 	struct delayed_work update_work;

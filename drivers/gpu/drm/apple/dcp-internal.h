@@ -266,6 +266,13 @@ struct apple_dcp {
 	struct dentry *ep_debugfs[0x20];
 
 	/* these fields are output port specific */
+	/*
+	 * One Type-C PHY per port, same idea as @xbars: a display on plain
+	 * DisplayPort altmode can arrive on any port and @phy points at the
+	 * one it did.
+	 */
+	struct phy *phys[DCP_MAX_ATC];
+	unsigned int n_phys;
 	struct phy *phy;
 	/*
 	 * A tunnelled display can arrive on any Type-C port, so hold one

@@ -18,6 +18,17 @@
 #include <linux/usb/typec_altmode.h>
 #include <linux/usb/typec_dp.h>
 #include <linux/usb/typec_mux.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
+
+/*
+ * Looked up at run time, never linked against: a display driver that can drive
+ * a display on more than one Type-C port offers this so it can be told which
+ * one, and the Type-C stack must not grow a dependency on one for it.
+ */
+int dcp_dptx_select_atc(struct platform_device *pdev, unsigned int atc,
+			bool tunnel);
 #include <linux/usb/typec_tbt.h>
 #include <linux/usb/role.h>
 #include <linux/workqueue.h>
@@ -784,8 +795,31 @@ static void cd321x_update_work(struct work_struct *work)
 	/* Launch the USB role switch */
 	usb_role_switch_set_role(tps->role_sw, new_role);
 
-	if (cd321x->connector_fwnode && dp_hpd)
+	if (cd321x->connector_fwnode && dp_hpd) {
+		/*
+		 * Tell the display controller which port it is about to drive
+		 * before reporting the display, so it picks this port's PHY
+		 * and crossbar. A controller that only ever serves one port
+		 * does not export this and does not need telling.
+		 */
+		if (cd321x->has_atc_index) {
+			u32 atc = cd321x->atc_index;
+			struct device_node *np = to_of_node(cd321x->connector_fwnode);
+			struct platform_device *dcp = np ? of_find_device_by_node(np) : NULL;
+
+			if (dcp) {
+				int (*sel)(struct platform_device *, unsigned int, bool);
+
+				sel = symbol_get(dcp_dptx_select_atc);
+				if (sel) {
+					sel(dcp, atc, false);
+					symbol_put(dcp_dptx_select_atc);
+				}
+				put_device(&dcp->dev);
+			}
+		}
 		drm_connector_oob_hotplug_event(cd321x->connector_fwnode, connector_status_connected);
+	}
 
 	power_supply_changed(tps->psy);
 }
@@ -1245,6 +1279,10 @@ cd321x_register_port(struct tps6598x *tps, struct fwnode_handle *fwnode)
 		connector_fwnode = fwnode_find_reference(fwnode, "displayport", 0);
 	if (!IS_ERR_OR_NULL(connector_fwnode))
 		cd321x->connector_fwnode = connector_fwnode;
+	cd321x->has_atc_index =
+		!fwnode_property_read_u32(fwnode, "apple,atc-index",
+					  &cd321x->atc_index);
+
 	cd321x->tbt_switch = fwnode_typec_thunderbolt_switch_get(fwnode);
 	if (IS_ERR(cd321x->tbt_switch)) {
 		ret = PTR_ERR(cd321x->tbt_switch);

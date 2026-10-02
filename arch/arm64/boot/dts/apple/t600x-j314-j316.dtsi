@@ -295,6 +295,12 @@
 			power-role = "dual";
 			data-role = "dual";
 
+#ifdef ENABLE_DCPEXT_TYPEC
+			/* see the Left Front connector */
+			displayport = <&dcpext1>;
+			apple,atc-index = <0>;
+#endif
+
 
 			ports {
 				#address-cells = <1>;
@@ -337,6 +343,7 @@
 			 * blocks, which names the controller for that instead.
 			 */
 			displayport = <&dcpext1>;
+			apple,atc-index = <1>;
 #endif
 
 			ports {
@@ -370,6 +377,12 @@
 			label = "USB-C Right";
 			power-role = "dual";
 			data-role = "dual";
+
+#ifdef ENABLE_DCPEXT_TYPEC
+			/* see the Left Front connector */
+			displayport = <&dcpext1>;
+			apple,atc-index = <2>;
+#endif
 
 
 			ports {
@@ -425,10 +438,21 @@
 
 	/* hacks */
 	apple,dptx-phy = <1>;
-	phys = <&atcphy1 PHY_TYPE_DP>;
-	phy-names = "dp-phy";
-	mux-controls = <&atcphy1_xbar 0>;
-	mux-control-names = "dp-xbar";
+	/*
+	 * One per Type-C port. A display on plain DisplayPort altmode can
+	 * arrive on any of them and only one is ever driven at a time, so
+	 * hold all three and pick at connect, the way the tunnel side picks
+	 * its crossbar.
+	 */
+	phys = <&atcphy0 PHY_TYPE_DP>,
+	       <&atcphy1 PHY_TYPE_DP>,
+	       <&atcphy2 PHY_TYPE_DP>;
+	phy-names = "dp-phy-atc0", "dp-phy-atc1", "dp-phy-atc2";
+	/* one per port, control 0 is MUX_DPPHY - the PHY's own output */
+	mux-controls = <&atcphy0_xbar 0>,
+		       <&atcphy1_xbar 0>,
+		       <&atcphy2_xbar 0>;
+	mux-control-names = "dp-xbar-atc0", "dp-xbar-atc1", "dp-xbar-atc2";
 	mux-index = <2>;
 };
 

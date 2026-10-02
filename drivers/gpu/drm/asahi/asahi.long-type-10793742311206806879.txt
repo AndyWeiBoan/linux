@@ -1,0 +1,1 @@
+object::GpuObject<fw::buffer::SceneG14V12_4, GenericAlloc<fw::buffer::SceneG14V12_4, HeapAllocation>>

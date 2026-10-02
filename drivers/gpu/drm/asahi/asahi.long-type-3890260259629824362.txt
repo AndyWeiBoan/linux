@@ -1,0 +1,2 @@
+object::GpuObject<fw::initdata::RuntimePointersG14V12_4, GenericAlloc<fw::initdata::RuntimePointersG14V12_4, HeapAllocation>>
+object::GpuObject<fw::initdata::InitDataG14V12_4, GenericAlloc<fw::initdata::InitDataG14V12_4, HeapAllocation>>

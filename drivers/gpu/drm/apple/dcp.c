@@ -729,23 +729,56 @@ static void dcp_autoconnect_work(struct work_struct *work)
  * firmware has to drive. Whoever brings the tunnel up knows that; call this
  * before reporting the display so the connect that follows uses the right one.
  */
-int dcp_dptx_select_atc(struct platform_device *pdev, unsigned int atc)
+int dcp_dptx_select_atc(struct platform_device *pdev, unsigned int atc,
+			bool tunnel)
 {
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+	unsigned int have;
 
 	if (!dcp)
 		return -ENODEV;
-	if (atc >= dcp->n_xbars || !dcp->xbars[atc])
+	if (atc >= DCP_MAX_ATC)
 		return -EINVAL;
 
-	if (dcp->xbar != dcp->xbars[atc]) {
+	/* Nothing to pick from means this one only ever serves a single port */
+	have = max(dcp->n_xbars, dcp->n_phys);
+	if (!have)
+		return 0;
+	if (atc >= have)
+		return -EINVAL;
+
+	if (dcp->xbars[atc] && dcp->xbar != dcp->xbars[atc]) {
+		u32 state;
+
 		mux_control_deselect(dcp->xbar);
 		dcp->xbar = dcp->xbars[atc];
-	}
-	dcp->dptx_phy = atc;
-	dcp->tunnel_pending = true;
 
-	dev_info(dcp->dev, "tunnelled display is on ATC %u\n", atc);
+		/*
+		 * The new crossbar still has to be told what to route. The
+		 * tunnelled path redoes this in dcp_dptx_connect() because the
+		 * Type-C mode switch clears it, but a controller driving a PHY
+		 * of its own never goes through there and would otherwise keep
+		 * whatever probe happened to select on a different port's
+		 * crossbar.
+		 */
+		if (!of_property_read_u32(dcp->dev->of_node, "mux-index",
+					  &state)) {
+			int xret = mux_control_select(dcp->xbar, state);
+
+			if (xret)
+				dev_warn(dcp->dev,
+					 "ATC %u: crossbar state %u failed: %d\n",
+					 atc, state, xret);
+		}
+	}
+	if (dcp->phys[atc])
+		dcp->phy = dcp->phys[atc];
+	dcp->dptx_phy = atc;
+	if (tunnel)
+		dcp->tunnel_pending = true;
+
+	dev_info(dcp->dev, "%s display is on ATC %u\n",
+		 tunnel ? "tunnelled" : "DisplayPort altmode", atc);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(dcp_dptx_select_atc);
@@ -1508,10 +1541,46 @@ static int dcp_platform_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, dcp);
 
+	/*
+	 * Either one PHY under the old "dp-phy" name, or one per Type-C port
+	 * a display can arrive on. Start out on the one the device tree says
+	 * this controller drives.
+	 */
 	dcp->phy = devm_phy_optional_get(dev, "dp-phy");
 	if (IS_ERR(dcp->phy)) {
 		dev_err(dev, "Failed to get dp-phy: %ld\n", PTR_ERR(dcp->phy));
 		return PTR_ERR(dcp->phy);
+	}
+	if (!dcp->phy) {
+		unsigned int i;
+
+		for (i = 0; i < DCP_MAX_ATC; i++) {
+			char name[16];
+			struct phy *p;
+
+			snprintf(name, sizeof(name), "dp-phy-atc%u", i);
+			p = devm_phy_optional_get(dev, name);
+			if (IS_ERR(p)) {
+				dev_err(dev, "Failed to get %s: %ld\n", name,
+					PTR_ERR(p));
+				return PTR_ERR(p);
+			}
+			if (!p)
+				continue;
+			dcp->phys[i] = p;
+			dcp->n_phys = i + 1;
+		}
+		if (dcp->n_phys) {
+			u32 which = 0;
+
+			of_property_read_u32(dev->of_node, "apple,dptx-phy",
+					     &which);
+			if (which >= DCP_MAX_ATC || !dcp->phys[which])
+				which = 0;
+			dcp->phy = dcp->phys[which];
+			dev_info(dev, "%u Type-C PHY(s), starting on ATC %u\n",
+				 dcp->n_phys, which);
+		}
 	}
 
 	bitmap_zero(dcp->iomfb_surfaces, DCP_MAX_PLANES);

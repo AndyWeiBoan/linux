@@ -23,7 +23,8 @@
  * drive a tunnelled display on more than one port offers this so it can be
  * told which one, and USB4 must not grow a dependency on one for it.
  */
-int dcp_dptx_select_atc(struct platform_device *pdev, unsigned int atc);
+int dcp_dptx_select_atc(struct platform_device *pdev, unsigned int atc,
+			bool tunnel);
 
 #include "tb.h"
 #include "tb_regs.h"
@@ -200,11 +201,11 @@ static void tb_dp_oob_hotplug(struct tb_tunnel *tunnel,
 		np = to_of_node(fwnode);
 		pdev = np ? of_find_device_by_node(np) : NULL;
 		if (pdev) {
-			int (*sel)(struct platform_device *, unsigned int);
+			int (*sel)(struct platform_device *, unsigned int, bool);
 
 			sel = symbol_get(dcp_dptx_select_atc);
 			if (sel) {
-				sel(pdev, atc);
+				sel(pdev, atc, true);
 				symbol_put(dcp_dptx_select_atc);
 			}
 			put_device(&pdev->dev);
