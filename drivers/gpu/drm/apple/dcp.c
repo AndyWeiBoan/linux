@@ -360,8 +360,17 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
 		crtc_state->mode_changed = true;
 	}
 
+	/*
+	 * Keeping a CRTC scanning out to a display that has gone away would
+	 * have the firmware swap into nothing, so refuse it. A CRTC that is
+	 * not being turned on is a different matter: an unused controller
+	 * with nothing plugged into it is the normal state of the two
+	 * external ones on a laptop, and rejecting it fails the whole atomic
+	 * commit, taking every other display down with it. That is how the
+	 * built-in panel ends up dark while nothing is plugged in at all.
+	 */
 	needs_modeset = drm_atomic_crtc_needs_modeset(crtc_state);
-	if (!needs_modeset && !dcp->connector->connected) {
+	if (crtc_state->active && !needs_modeset && !dcp->connector->connected) {
 		dev_err(dcp->dev, "crtc_atomic_check: disconnected but no modeset\n");
 		return -EINVAL;
 	}
