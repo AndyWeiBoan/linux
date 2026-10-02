@@ -30,6 +30,7 @@
 #include <linux/msi.h>
 #include <linux/of_irq.h>
 #include <linux/pci-ecam.h>
+#include <linux/pm_domain.h>
 
 #include "pci-host-common.h"
 
@@ -150,6 +151,18 @@ MODULE_PARM_DESC(link_up_timeout, "PCIe link training timeout in milliseconds");
  */
 #define DOORBELL_ADDR		CONFIG_PCIE_APPLE_MSI_DOORBELL_ADDR
 
+/*
+ * Bringing a tunnelled root complex up pokes registers in a block that is
+ * only powered once both of its power domains are on, and getting that wrong
+ * is an SError rather than an error code. Keep it behind an explicit opt-in
+ * until it has been shown to work, so a bad guess costs one boot with the
+ * parameter set rather than an unbootable kernel.
+ */
+static bool apple_pcie_enable_tunnel;
+module_param_named(enable_tunnel, apple_pcie_enable_tunnel, bool, 0444);
+MODULE_PARM_DESC(enable_tunnel,
+		 "Bring up the Thunderbolt PCIe root complexes (apciec)");
+
 struct hw_info {
 	u32 phy_lane_ctl;
 	u32 port_msiaddr;
@@ -159,6 +172,15 @@ struct hw_info {
 	u32 port_rid2sid;
 	u32 port_msimap;
 	u32 max_rid2sid;
+	/*
+	 * Thunderbolt-tunnelled root complexes, which Apple calls "apciec".
+	 * The link runs over the USB4 fabric, so there is no PERST# GPIO to
+	 * drive and no PCIe PHY of our own to hand a refclk request to: the
+	 * ATC PHY, driven by phy/apple/atc.c and shared with Thunderbolt,
+	 * already owns both. They also sit behind two power domains rather
+	 * than one, which the driver core refuses to attach on its own.
+	 */
+	bool tunnelled;
 };
 
 static const struct hw_info t8103_hw = {
@@ -194,6 +216,7 @@ struct apple_pcie {
 	struct completion	event;
 	struct irq_fwspec	fwspec;
 	u32			nvecs;
+	struct dev_pm_domain_list *pd_list;
 };
 
 struct apple_pcie_port {
@@ -566,6 +589,35 @@ static int apple_pcie_setup_link(struct apple_pcie *pcie,
 	int ret;
 
 	/*
+	 * A tunnelled link has nothing of its own to sequence. There is no
+	 * PERST# pin on a Type-C port, and the reference clock comes from the
+	 * ATC PHY, which phy/apple/atc.c has already configured by the time a
+	 * cable is up. All that is left is to let the block have its clock and
+	 * take the port out of reset.
+	 */
+	if (pcie->hw->tunnelled) {
+		rmw_set(PORT_APPCLK_EN, port->base + PORT_APPCLK);
+		rmw_set(PORT_PERST_OFF, port->base + pcie->hw->port_perst);
+
+		ret = readl_relaxed_poll_timeout(port->base + PORT_STATUS, stat,
+						 stat & PORT_STATUS_READY,
+						 100, 250000);
+
+		/*
+		 * With no cable in the port there is nothing on the far side of
+		 * the fabric for the link to reach, so not becoming ready is the
+		 * normal state at boot rather than a failure. Keep the port
+		 * registered either way: the link-up interrupt is what brings a
+		 * tunnel in later, and it only arrives if we are still here.
+		 */
+		dev_info(pcie->dev, "%pOF: status 0x%08x, link 0x%08x%s\n", np,
+			 readl_relaxed(port->base + PORT_STATUS),
+			 readl_relaxed(port->base + PORT_LINKSTS),
+			 ret < 0 ? " (not ready, no cable?)" : "");
+		return 0;
+	}
+
+	/*
 	 * Assert PERST# and configure the pin as output.
 	 * The Aquantia AQC113 10GB nic used desktop macs is sensitive to
 	 * deasserting it without prior clock setup.
@@ -925,9 +977,13 @@ static const struct pci_ecam_ops apple_pcie_cfg_ecam_ops = {
 	}
 };
 
-static int apple_pcie_probe_port(struct device_node *np)
+static int apple_pcie_probe_port(struct device_node *np, const struct hw_info *hw)
 {
 	struct gpio_desc *gd;
+
+	/* A tunnelled port has neither GPIO; there is nothing to wait for. */
+	if (hw->tunnelled)
+		return 0;
 
 	/* check whether the GPPIO pin exists but leave it as is */
 	gd = fwnode_gpiod_get_index(of_fwnode_handle(np), "reset", 0,
@@ -955,11 +1011,21 @@ static int apple_pcie_probe(struct platform_device *pdev)
 	struct pci_host_bridge *bridge;
 	struct device_node *of_port;
 	struct apple_pcie *pcie;
+	const struct hw_info *hw;
 	int ret;
+
+	hw = of_device_get_match_data(dev);
+	if (!hw)
+		return -ENODEV;
+
+	if (hw->tunnelled && !apple_pcie_enable_tunnel) {
+		dev_info(dev, "tunnelled root complex left alone (pass pcie_apple.enable_tunnel=1 to bring it up)\n");
+		return -ENODEV;
+	}
 
 	/* Check for probe dependencies for all ports first */
 	for_each_available_child_of_node(dev->of_node, of_port) {
-		ret = apple_pcie_probe_port(of_port);
+		ret = apple_pcie_probe_port(of_port, hw);
 		if (ret) {
 			of_node_put(of_port);
 			return dev_err_probe(dev, ret, "Port %pOF probe fail\n", of_port);
@@ -972,9 +1038,26 @@ static int apple_pcie_probe(struct platform_device *pdev)
 
 	pcie = pci_host_bridge_priv(bridge);
 	pcie->dev = dev;
-	pcie->hw = of_device_get_match_data(dev);
-	if (!pcie->hw)
-		return -ENODEV;
+	pcie->hw = hw;
+
+	/*
+	 * A tunnelled root complex is listed with two power domains, and the
+	 * driver core attaches none of them in that case - it only handles the
+	 * single-domain shorthand. Nothing below may touch a register until
+	 * both are on, so take them here and keep them on for as long as the
+	 * driver is bound.
+	 */
+	if (hw->tunnelled) {
+		struct dev_pm_domain_attach_data pd_data = {
+			.pd_flags = PD_FLAG_DEV_LINK_ON,
+		};
+
+		ret = devm_pm_domain_attach_list(dev, &pd_data, &pcie->pd_list);
+		if (ret < 0)
+			return dev_err_probe(dev, ret, "cannot attach PM domains\n");
+		dev_info(dev, "powered on %d domains\n", ret);
+	}
+
 	pcie->base = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(pcie->base))
 		return PTR_ERR(pcie->base);
@@ -989,7 +1072,20 @@ static int apple_pcie_probe(struct platform_device *pdev)
 	return pci_host_common_init(pdev, bridge, &apple_pcie_cfg_ecam_ops);
 }
 
+static const struct hw_info t6000_pciec_hw = {
+	.phy_lane_ctl		= 0,
+	.port_msiaddr		= PORT_MSIADDR,
+	.port_msiaddr_hi	= 0,
+	.port_refclk		= PORT_REFCLK,
+	.port_perst		= PORT_PERST,
+	.port_rid2sid		= PORT_RID2SID,
+	.port_msimap		= 0,
+	.max_rid2sid		= 64,
+	.tunnelled		= true,
+};
+
 static const struct of_device_id apple_pcie_of_match[] = {
+	{ .compatible = "apple,t6000-pciec",	.data = &t6000_pciec_hw },
 	{ .compatible = "apple,t6020-pcie",	.data = &t602x_hw },
 	{ .compatible = "apple,pcie",		.data = &t8103_hw },
 	{ }
