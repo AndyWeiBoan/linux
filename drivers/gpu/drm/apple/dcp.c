@@ -429,8 +429,25 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		goto out_unlock;
 	}
 
-	if (dcp->dptxport[port].connected)
-		goto out_unlock;
+	if (dcp->dptxport[port].connected) {
+		/*
+		 * Being told a display showed up while we still think one is
+		 * attached means the disconnect never reached us. It is
+		 * reported on the controller the Type-C connector names, which
+		 * is the one driving the port's PHY rather than this one when
+		 * the display came over a tunnel; and a tunnel whose block
+		 * simply loses power never reaches the teardown path that
+		 * would report it either.
+		 *
+		 * Trust the event: the old display is gone. Drop it here
+		 * rather than silently ignoring the new one, which left every
+		 * later hotplug dead until reboot.
+		 */
+		dev_info(dcp->dev,
+			 "connect while still connected, dropping stale display\n");
+		dptxport_release_display(dcp->dptxport[port].service);
+		dcp->dptxport[port].connected = false;
+	}
 
 	/*
 	 * Re-apply the crossbar routing here, not just at probe.
