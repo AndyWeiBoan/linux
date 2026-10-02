@@ -1057,14 +1057,39 @@ static int apple_pcie_probe(struct platform_device *pdev)
 	 * driver is bound.
 	 */
 	if (hw->tunnelled) {
+		/*
+		 * Two power domains, and the driver core attaches neither in
+		 * that case - it only handles the single-domain shorthand. Take
+		 * them here, but power on only the first.
+		 *
+		 * The second is the Thunderbolt controller's own PCIe domain,
+		 * which thunderbolt/apple.c deliberately leaves off until it has
+		 * configured the Type-C PHY into USB4 mode. Holding it on from
+		 * boot takes that sequencing away from it: its firmware gets
+		 * through lane init as far as seeing the remote end and then
+		 * stops with "Pipe command 37 timeout", and nothing plugged into
+		 * any port is ever enumerated.
+		 */
 		struct dev_pm_domain_attach_data pd_data = {
-			.pd_flags = PD_FLAG_DEV_LINK_ON,
+			.pd_flags = PD_FLAG_NO_DEV_LINK,
 		};
+		struct device_link *link;
 
 		ret = devm_pm_domain_attach_list(dev, &pd_data, &pcie->pd_list);
 		if (ret < 0)
 			return dev_err_probe(dev, ret, "cannot attach PM domains\n");
-		dev_info(dev, "powered on %d domains\n", ret);
+		if (ret < 1)
+			return dev_err_probe(dev, -EINVAL, "no PM domains\n");
+
+		link = device_link_add(dev, pcie->pd_list->pd_devs[0],
+				       DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME |
+				       DL_FLAG_RPM_ACTIVE);
+		if (!link)
+			return dev_err_probe(dev, -ENODEV, "cannot power on\n");
+		pcie->pd_list->pd_links[0] = link;
+
+		dev_info(dev, "attached %d domains, powered on 1 (%s)\n",
+			 ret, dev_name(pcie->pd_list->pd_devs[0]));
 	}
 
 	pcie->base = devm_platform_ioremap_resource(pdev, 1);
