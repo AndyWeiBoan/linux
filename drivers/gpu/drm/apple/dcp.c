@@ -392,6 +392,10 @@ int apple_dpxbar_finish_dp_tunnel(struct mux_control *mux);
 
 bool dcp_finish_dp_tunnel = true;
 module_param(dcp_finish_dp_tunnel, bool, 0644);
+static bool dcp_finish_early = true;
+module_param(dcp_finish_early, bool, 0644);
+MODULE_PARM_DESC(dcp_finish_early,
+		 "Arm the DP IN adapter before asserting HPD, the way macOS does");
 MODULE_PARM_DESC(dcp_finish_dp_tunnel, "Arm DP IN + PHY + crossbar from inside dcp_dptx_connect()");
 
 int dcp_force_timing_id = -1;
@@ -529,6 +533,23 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	 *     hotPlugDetectChangeOccurred / hotPlugDetectChangeOccurred /
 	 *     SET_TILED_DISPLAY_HINTS / GET_MAX_LINK_RATE / ...
 	 */
+	/*
+	 * Arm the hardware before telling the firmware the display is there,
+	 * which is the order macOS uses. The other way round the firmware has
+	 * nothing to train against: both hotplug calls and the link
+	 * configuration that follows then sit there until they time out, which
+	 * is four of the six seconds this takes.
+	 */
+	if (dcp_finish_early && !dcp->phy && dcp->xbar &&
+	    dcp->tunnel_pending && dcp_finish_dp_tunnel) {
+		int fret = apple_dpxbar_finish_dp_tunnel(dcp->xbar);
+
+		if (fret)
+			dev_warn(dcp->dev, "finish_dp_tunnel: %d\n", fret);
+		else
+			dev_info(dcp->dev, "finish_dp_tunnel: done (early)\n");
+	}
+
 	if (!dcp->phy && dcp->xbar) {
 		dptxport_set_hpd(dcp->dptxport[port].service, true);
 		dptxport_set_hpd(dcp->dptxport[port].service, true);
@@ -556,7 +577,8 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	 * configureDPTunnelMode writes and enabling the crossbar clocks has to
 	 * happen right here.
 	 */
-	if (!dcp->phy && dcp->xbar && dcp->tunnel_pending && dcp_finish_dp_tunnel) {
+	if (!dcp_finish_early && !dcp->phy && dcp->xbar &&
+	    dcp->tunnel_pending && dcp_finish_dp_tunnel) {
 		int fret = apple_dpxbar_finish_dp_tunnel(dcp->xbar);
 
 		if (fret)

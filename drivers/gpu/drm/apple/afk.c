@@ -981,6 +981,15 @@ int afk_send_command(struct apple_epic_service *service, u8 type,
 			service->cmds[idx].completion = NULL;
 			service->cmds[idx].free_on_ack = true;
 			spin_unlock_irqrestore(&service->lock, flags);
+			/*
+			 * A second of nothing, and the caller only sees an
+			 * error code. Say which command it was: a handful of
+			 * these in a row is most of the time it takes to bring
+			 * a display up.
+			 */
+			dev_warn(ep->dcp->dev,
+				 "AFK: channel %u command %u timed out\n",
+				 service->channel, type);
 			return -ETIMEDOUT;
 		}
 		spin_unlock_irqrestore(&service->lock, flags);
