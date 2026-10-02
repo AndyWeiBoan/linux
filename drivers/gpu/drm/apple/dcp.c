@@ -355,9 +355,29 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
 	 * The result is a machine that boots to a black screen whenever the
 	 * display was left plugged in.
 	 */
-	if (!dcp->valid_mode && !(!dcp->phy && dcp->xbar)) {
-		dev_info(dcp->dev, "forcing modeset: no valid output mode\n");
-		crtc_state->mode_changed = true;
+	if (!dcp->valid_mode) {
+		bool tunnelled = !dcp->phy && dcp->xbar;
+
+		/*
+		 * A tunnelled display is normally brought up by
+		 * dcp_dptx_connect(), and forcing a modeset for one before the
+		 * compositor has turned its CRTC on is actively harmful - that
+		 * is the boot-with-the-display-attached case above. Once the
+		 * CRTC is on and the connector is connected the compositor has
+		 * picked a mode, so a forced modeset uses that one.
+		 *
+		 * It is needed there because the firmware drops the connection
+		 * for a couple of hundred milliseconds right after reporting
+		 * it. Commits that land in that window are rejected below, the
+		 * compositor stops trying, and the display is left with no
+		 * output mode and dark while everything above believes it is
+		 * configured. Nothing else ever asks for a mode again.
+		 */
+		if (!tunnelled ||
+		    (dcp->connector->connected && crtc_state->active)) {
+			dev_info(dcp->dev, "forcing modeset: no valid output mode\n");
+			crtc_state->mode_changed = true;
+		}
 	}
 
 	/*
