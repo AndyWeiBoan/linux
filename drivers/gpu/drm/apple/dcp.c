@@ -339,7 +339,23 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
 
 	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
 
-	if (!dcp->valid_mode) {
+	/*
+	 * Forcing a modeset here is for a display on plain DisplayPort altmode,
+	 * whose controller reports the display as connected while it still has
+	 * no output mode: without it nothing ever asks for one and the display
+	 * stays dark.
+	 *
+	 * A display reached over a tunnel is brought up by dcp_dptx_connect()
+	 * instead, and forcing one for it is actively harmful. At boot the
+	 * display appears while the compositor is still starting, so the forced
+	 * modeset runs before anything has chosen a mode and DRM takes the
+	 * first one going. That one fails to configure the video clock, the
+	 * firmware drops the display, and the compositor - still counting its
+	 * outputs - ends up with none at all, including the built-in panel.
+	 * The result is a machine that boots to a black screen whenever the
+	 * display was left plugged in.
+	 */
+	if (!dcp->valid_mode && !(!dcp->phy && dcp->xbar)) {
 		dev_info(dcp->dev, "forcing modeset: no valid output mode\n");
 		crtc_state->mode_changed = true;
 	}
