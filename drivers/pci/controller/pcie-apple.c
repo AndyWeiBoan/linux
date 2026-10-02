@@ -780,7 +780,16 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 	WARN_ON(ret);
 
 	link_stat = readl_relaxed(port->base + PORT_LINKSTS);
-	if (!(link_stat & PORT_LINKSTS_UP)) {
+	if (!(link_stat & PORT_LINKSTS_UP) && pcie->hw->tunnelled) {
+		/*
+		 * Nothing is going to answer until a cable is plugged in and a
+		 * tunnel is built, which is minutes or hours away, not
+		 * milliseconds. Arm the link and leave: the link-up interrupt
+		 * is what tells us a tunnel arrived. Waiting here only delays
+		 * the rest of the boot by link_up_timeout per controller.
+		 */
+		writel_relaxed(PORT_LTSSMCTL_START, port->base + PORT_LTSSMCTL);
+	} else if (!(link_stat & PORT_LINKSTS_UP)) {
 		unsigned long timeout, left;
 		/* start link training */
 		writel_relaxed(PORT_LTSSMCTL_START, port->base + PORT_LTSSMCTL);
