@@ -2419,6 +2419,49 @@ static int tb_disconnect_pci(struct tb *tb, struct tb_switch *sw)
 	return 0;
 }
 
+/* Looked up at run time, never linked against: see tb_dp_oob_hotplug(). */
+int apple_pcie_tunnel_up(struct platform_device *pdev);
+
+/*
+ * Tell the root complex a PCIe tunnel landed on it. On a PC the root port has
+ * a hotplug controller that notices by itself; this one does not, and until
+ * something re-arms link training and rescans, the device on the far side of
+ * the tunnel is simply never found.
+ */
+static void tb_pci_tunnel_up(struct tb *tb)
+{
+	int (*up)(struct platform_device *);
+	struct platform_device *pdev;
+	struct fwnode_handle *host, *sink;
+	struct device_node *np;
+
+	if (!IS_REACHABLE(CONFIG_PCIE_APPLE))
+		return;
+	if (!tb->nhi || !tb->nhi->dev || !tb->nhi->dev->parent)
+		return;
+
+	host = dev_fwnode(tb->nhi->dev->parent);
+	if (!host)
+		return;
+
+	sink = fwnode_find_reference(host, "apple,pcie-tunnel-sink", 0);
+	if (IS_ERR(sink))
+		return;
+
+	np = to_of_node(sink);
+	pdev = np ? of_find_device_by_node(np) : NULL;
+	fwnode_handle_put(sink);
+	if (!pdev)
+		return;
+
+	up = symbol_get(apple_pcie_tunnel_up);
+	if (up) {
+		up(pdev);
+		symbol_put(apple_pcie_tunnel_up);
+	}
+	put_device(&pdev->dev);
+}
+
 static int tb_tunnel_pci(struct tb *tb, struct tb_switch *sw)
 {
 	struct tb_port *up, *down, *port;
@@ -2460,6 +2503,9 @@ static int tb_tunnel_pci(struct tb *tb, struct tb_switch *sw)
 		tb_sw_warn(sw, "failed to connect xHCI\n");
 
 	list_add_tail(&tunnel->list, &tcm->tunnel_list);
+
+	tb_pci_tunnel_up(tb);
+
 	return 0;
 }
 

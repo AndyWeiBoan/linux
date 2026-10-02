@@ -1073,6 +1073,65 @@ static const struct hw_info t6000_pciec_hw = {
 	.tunnelled		= true,
 };
 
+int apple_pcie_tunnel_up(struct platform_device *pdev);
+
+/**
+ * apple_pcie_tunnel_up() - a PCIe tunnel reached this root complex
+ * @pdev: the root complex the tunnel lands on
+ *
+ * Called by the Thunderbolt driver once it has built a PCIe tunnel to a device
+ * behind one of the Type-C ports. Until that moment there was nothing on the
+ * far side of the fabric for the link to train against, and there is no
+ * hotplug controller on this root complex to notice by itself, so re-arm link
+ * training here and then go and look at what turned up.
+ */
+int apple_pcie_tunnel_up(struct platform_device *pdev)
+{
+	struct apple_pcie *pcie = apple_pcie_lookup(&pdev->dev);
+	struct pci_host_bridge *bridge;
+	struct apple_pcie_port *port;
+	unsigned long timeout, left;
+	u32 link_stat;
+
+	if (!pcie || !pcie->hw || !pcie->hw->tunnelled)
+		return -ENODEV;
+
+	bridge = pci_host_bridge_from_priv(pcie);
+	if (!bridge || !bridge->bus)
+		return -ENODEV;
+
+	port = list_first_entry_or_null(&pcie->ports, struct apple_pcie_port,
+					entry);
+	if (!port)
+		return -ENODEV;
+
+	link_stat = readl_relaxed(port->base + PORT_LINKSTS);
+	dev_info(pcie->dev, "tunnel up: status 0x%08x, link 0x%08x\n",
+		 readl_relaxed(port->base + PORT_STATUS), link_stat);
+
+	if (!(link_stat & PORT_LINKSTS_UP)) {
+		reinit_completion(&pcie->event);
+		writel_relaxed(PORT_LTSSMCTL_START,
+			       port->base + PORT_LTSSMCTL);
+
+		timeout = link_up_timeout * HZ / 1000;
+		left = wait_for_completion_timeout(&pcie->event, timeout);
+		link_stat = readl_relaxed(port->base + PORT_LINKSTS);
+		dev_info(pcie->dev, "re-armed link training: link 0x%08x%s\n",
+			 link_stat, left ? "" : " (timed out)");
+	}
+
+	if (!(link_stat & PORT_LINKSTS_UP))
+		return -ENODEV;
+
+	pci_lock_rescan_remove();
+	pci_rescan_bus(bridge->bus);
+	pci_unlock_rescan_remove();
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(apple_pcie_tunnel_up);
+
 static const struct of_device_id apple_pcie_of_match[] = {
 	{ .compatible = "apple,t6000-pciec",	.data = &t6000_pciec_hw },
 	{ .compatible = "apple,t6020-pcie",	.data = &t602x_hw },

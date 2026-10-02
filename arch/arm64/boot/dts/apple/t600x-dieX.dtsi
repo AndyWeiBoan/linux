@@ -486,6 +486,13 @@
 		 * own device tree. Whatever arrives over a tunnel here has to be
 		 * routed through that port's display crossbar. */
 		apple,atc-index = <0>;
+		/*
+		 * The PCIe root complex a PCIe tunnel arriving here lands on.
+		 * There is no hotplug controller on it, so it has to be told
+		 * when a tunnel is built or the device on the far side is
+		 * never found.
+		 */
+		apple,pcie-tunnel-sink = <&DIE_NODE(pciec0)>;
 		reg = <0x7 0x01ac0000 0x0 0xc000>,
 			<0x7 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -751,6 +758,13 @@
 		 * own device tree. Whatever arrives over a tunnel here has to be
 		 * routed through that port's display crossbar. */
 		apple,atc-index = <1>;
+		/*
+		 * The PCIe root complex a PCIe tunnel arriving here lands on.
+		 * There is no hotplug controller on it, so it has to be told
+		 * when a tunnel is built or the device on the far side is
+		 * never found.
+		 */
+		apple,pcie-tunnel-sink = <&DIE_NODE(pciec1)>;
 		reg = <0xb 0x01ac0000 0x0 0xc000>,
 			<0xb 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -1023,6 +1037,13 @@
 		 * own device tree. Whatever arrives over a tunnel here has to be
 		 * routed through that port's display crossbar. */
 		apple,atc-index = <2>;
+		/*
+		 * The PCIe root complex a PCIe tunnel arriving here lands on.
+		 * There is no hotplug controller on it, so it has to be told
+		 * when a tunnel is built or the device on the far side is
+		 * never found.
+		 */
+		apple,pcie-tunnel-sink = <&DIE_NODE(pciec2)>;
 		reg = <0xf 0x01ac0000 0x0 0xc000>,
 			<0xf 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
