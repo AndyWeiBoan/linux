@@ -30,7 +30,6 @@
 #include <linux/msi.h>
 #include <linux/of_irq.h>
 #include <linux/pci-ecam.h>
-#include <linux/pm_domain.h>
 
 #include "pci-host-common.h"
 
@@ -216,7 +215,6 @@ struct apple_pcie {
 	struct completion	event;
 	struct irq_fwspec	fwspec;
 	u32			nvecs;
-	struct dev_pm_domain_list *pd_list;
 };
 
 struct apple_pcie_port {
@@ -1048,49 +1046,6 @@ static int apple_pcie_probe(struct platform_device *pdev)
 	pcie = pci_host_bridge_priv(bridge);
 	pcie->dev = dev;
 	pcie->hw = hw;
-
-	/*
-	 * A tunnelled root complex is listed with two power domains, and the
-	 * driver core attaches none of them in that case - it only handles the
-	 * single-domain shorthand. Nothing below may touch a register until
-	 * both are on, so take them here and keep them on for as long as the
-	 * driver is bound.
-	 */
-	if (hw->tunnelled) {
-		/*
-		 * Two power domains, and the driver core attaches neither in
-		 * that case - it only handles the single-domain shorthand. Take
-		 * them here, but power on only the first.
-		 *
-		 * The second is the Thunderbolt controller's own PCIe domain,
-		 * which thunderbolt/apple.c deliberately leaves off until it has
-		 * configured the Type-C PHY into USB4 mode. Holding it on from
-		 * boot takes that sequencing away from it: its firmware gets
-		 * through lane init as far as seeing the remote end and then
-		 * stops with "Pipe command 37 timeout", and nothing plugged into
-		 * any port is ever enumerated.
-		 */
-		struct dev_pm_domain_attach_data pd_data = {
-			.pd_flags = PD_FLAG_NO_DEV_LINK,
-		};
-		struct device_link *link;
-
-		ret = devm_pm_domain_attach_list(dev, &pd_data, &pcie->pd_list);
-		if (ret < 0)
-			return dev_err_probe(dev, ret, "cannot attach PM domains\n");
-		if (ret < 1)
-			return dev_err_probe(dev, -EINVAL, "no PM domains\n");
-
-		link = device_link_add(dev, pcie->pd_list->pd_devs[0],
-				       DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME |
-				       DL_FLAG_RPM_ACTIVE);
-		if (!link)
-			return dev_err_probe(dev, -ENODEV, "cannot power on\n");
-		pcie->pd_list->pd_links[0] = link;
-
-		dev_info(dev, "attached %d domains, powered on 1 (%s)\n",
-			 ret, dev_name(pcie->pd_list->pd_devs[0]));
-	}
 
 	pcie->base = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(pcie->base))

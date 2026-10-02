@@ -664,8 +664,7 @@
 		#iommu-cells = <1>;
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ DIE_NO 1198 IRQ_TYPE_LEVEL_HIGH>;
-		power-domains = <&DIE_NODE(ps_atc0_pcie)>,
-				<&DIE_NODE(ps_atc0_cio_pcie)>;
+		power-domains = <&DIE_NODE(ps_atc0_pcie)>;
 		status = "disabled";
 	};
 
@@ -700,8 +699,17 @@
 			<0x02000000 0x0 0x100000 0xa 0x100000 0x0 0x3ff00000>,
 			<0x42000000 0x0 0x40000000 0xa 0x40000000 0x0 0x40000000>;
 
-		power-domains = <&DIE_NODE(ps_atc0_pcie)>,
-				<&DIE_NODE(ps_atc0_cio_pcie)>;
+		/*
+		 * Apple's own device tree lists exactly two power-gates for
+		 * apciec0: ATC0_PCIE, which is this one, and a virtual
+		 * AUSB0_AONPCIE-V with no register behind it. Notably not
+		 * ATC0_CIO_PCIE - that one belongs to the Thunderbolt
+		 * controller, which may only power it once it has configured
+		 * the Type-C PHY into USB4 mode. Holding it on from here
+		 * stalls ACIO's lane init with "Pipe command 37 timeout" and
+		 * nothing plugged into any port is ever enumerated.
+		 */
+		power-domains = <&DIE_NODE(ps_atc0_pcie)>;
 		dma-coherent;
 
 		DIE_NODE(pciec0_port): pci@0,0 {
@@ -928,8 +936,7 @@
 		#iommu-cells = <1>;
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ DIE_NO 1215 IRQ_TYPE_LEVEL_HIGH>;
-		power-domains = <&DIE_NODE(ps_atc1_pcie)>,
-				<&DIE_NODE(ps_atc1_cio_pcie)>;
+		power-domains = <&DIE_NODE(ps_atc1_pcie)>;
 		status = "disabled";
 	};
 
@@ -964,8 +971,17 @@
 			<0x02000000 0x0 0x100000 0xe 0x100000 0x0 0x3ff00000>,
 			<0x42000000 0x0 0x40000000 0xe 0x40000000 0x0 0x40000000>;
 
-		power-domains = <&DIE_NODE(ps_atc1_pcie)>,
-				<&DIE_NODE(ps_atc1_cio_pcie)>;
+		/*
+		 * Apple's own device tree lists exactly two power-gates for
+		 * apciec1: ATC1_PCIE, which is this one, and a virtual
+		 * AUSB1_AONPCIE-V with no register behind it. Notably not
+		 * ATC1_CIO_PCIE - that one belongs to the Thunderbolt
+		 * controller, which may only power it once it has configured
+		 * the Type-C PHY into USB4 mode. Holding it on from here
+		 * stalls ACIO's lane init with "Pipe command 37 timeout" and
+		 * nothing plugged into any port is ever enumerated.
+		 */
+		power-domains = <&DIE_NODE(ps_atc1_pcie)>;
 		dma-coherent;
 
 		DIE_NODE(pciec1_port): pci@0,0 {
@@ -1184,8 +1200,7 @@
 		#iommu-cells = <1>;
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ DIE_NO 1232 IRQ_TYPE_LEVEL_HIGH>;
-		power-domains = <&DIE_NODE(ps_atc2_pcie)>,
-				<&DIE_NODE(ps_atc2_cio_pcie)>;
+		power-domains = <&DIE_NODE(ps_atc2_pcie)>;
 		status = "disabled";
 	};
 
@@ -1220,8 +1235,17 @@
 			<0x02000000 0x0 0x100000 0x12 0x100000 0x0 0x3ff00000>,
 			<0x42000000 0x0 0x40000000 0x12 0x40000000 0x0 0x40000000>;
 
-		power-domains = <&DIE_NODE(ps_atc2_pcie)>,
-				<&DIE_NODE(ps_atc2_cio_pcie)>;
+		/*
+		 * Apple's own device tree lists exactly two power-gates for
+		 * apciec2: ATC2_PCIE, which is this one, and a virtual
+		 * AUSB2_AONPCIE-V with no register behind it. Notably not
+		 * ATC2_CIO_PCIE - that one belongs to the Thunderbolt
+		 * controller, which may only power it once it has configured
+		 * the Type-C PHY into USB4 mode. Holding it on from here
+		 * stalls ACIO's lane init with "Pipe command 37 timeout" and
+		 * nothing plugged into any port is ever enumerated.
+		 */
+		power-domains = <&DIE_NODE(ps_atc2_pcie)>;
 		dma-coherent;
 
 		DIE_NODE(pciec2_port): pci@0,0 {
