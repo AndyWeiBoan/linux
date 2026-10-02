@@ -13,6 +13,16 @@
 
 	aliases {
 		gpu = &gpu;
+
+		/*
+		 * m1n1 copies Apple's PCIe tunables onto whatever node these
+		 * name, and onto that node's first child (the port). Without
+		 * the alias it prints "FDT: Unable to find alias usb4_N_pcie"
+		 * and silently skips that Thunderbolt PCIe controller.
+		 */
+		usb4_0_pcie = &pciec0;
+		usb4_1_pcie = &pciec1;
+		usb4_2_pcie = &pciec2;
 		#ifdef APPLE_USE_PMP
 		pmp = &pmp;
 		#endif
