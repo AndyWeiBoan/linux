@@ -241,6 +241,24 @@ static bool apple_pcie_tunnel_dry_run;
  */
 #define VARIANT_M1N1_PATH	BIT(3)
 
+/*
+ * Read back the offsets the transcript writes, on whichever controller, to
+ * find out which of them this SoC implements at all. Reads only: the internal
+ * controller is live and working, so what it answers with is a map of the IP
+ * as it exists here, which is the thing the t8103 transcript cannot tell us.
+ */
+static bool apple_pcie_dump_regs;
+module_param_named(dump_regs, apple_pcie_dump_regs, bool, 0644);
+MODULE_PARM_DESC(dump_regs, "Read back the registers the transcript writes");
+
+static const u32 apple_pcie_dump_offsets[] = {
+	0x080, 0x084, 0x088, 0x08c, 0x100, 0x104, 0x10c, 0x124, 0x128,
+	0x130, 0x13c, 0x140, 0x144, 0x148, 0x168, 0x16c, 0x208, 0x210,
+	0x21c, 0x800, 0x804, 0x808, 0x810, 0x814, 0x81c, 0x824, 0x82c,
+	0x834, 0x83c, 0x988, 0x98c, 0x994, 0x4020,
+};
+
+
 #define DWC_DBI_RO_WR		0x8bc
 #define DWC_DBI_RO_WR_EN	BIT(0)
 static unsigned int apple_pcie_tunnel_variant;
@@ -899,6 +917,27 @@ static int apple_pcie_setup_link(struct apple_pcie *pcie,
 	return 0;
 }
 
+static void apple_pcie_dump_port(struct apple_pcie *pcie,
+				 struct apple_pcie_port *port)
+{
+	char line[128];
+	int n = 0;
+
+	if (!apple_pcie_dump_regs)
+		return;
+
+	for (int i = 0; i < ARRAY_SIZE(apple_pcie_dump_offsets); i++) {
+		u32 off = apple_pcie_dump_offsets[i];
+
+		n += scnprintf(line + n, sizeof(line) - n, " %03x=%08x", off,
+			       readl_relaxed(port->base + off));
+		if (n > 90 || i == ARRAY_SIZE(apple_pcie_dump_offsets) - 1) {
+			dev_info(pcie->dev, "regs%s\n", line);
+			n = 0;
+		}
+	}
+}
+
 static int apple_pcie_setup_port(struct apple_pcie *pcie,
 				 struct device_node *np)
 {
@@ -997,6 +1036,8 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 	WARN_ON(ret);
 
 	link_stat = readl_relaxed(port->base + PORT_LINKSTS);
+	apple_pcie_dump_port(pcie, port);
+
 	if (pcie->hw->tunnelled) {
 		/*
 		 * Leave the port the way macOS leaves it between plugs:
