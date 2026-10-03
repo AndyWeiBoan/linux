@@ -1072,11 +1072,15 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 		 * stopped. Nothing will answer until a tunnel arrives, so
 		 * there is nothing to wait for.
 		 */
-		if (apple_pcie_tunnel_init_at_probe)
+		if (apple_pcie_tunnel_init_at_probe ||
+		    apple_pcie_tunnel_variant) {
 			apple_pcie_tunnel_port_init(pcie, port, false);
-		else
+			/* Second dump: what the pass actually changed. */
+			apple_pcie_dump_port(pcie, port);
+		} else {
 			writel_relaxed(PORT_LTSSMCTL_START,
 				       port->base + PORT_LTSSMCTL);
+		}
 	} else if (!(link_stat & PORT_LINKSTS_UP)) {
 		unsigned long timeout, left;
 		/* start link training */
