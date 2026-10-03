@@ -129,6 +129,11 @@ MODULE_PARM_DESC(link_up_timeout, "PCIe link training timeout in milliseconds");
 #define PORT_TUNNEL_CFG808		0x00808	/* 0x100045 */
 #define PORT_TUNNEL_CFG81C		0x0081c	/* 0 */
 #define PORT_TUNNEL_ARM			0x04020	/* 3, once the clocks are back on */
+#define PORT_TUNNEL_CFG084		0x00084	/* 0, right after LTSSM is stopped */
+#define PORT_TUNNEL_CFG824		0x00824	/* 0 */
+#define PORT_TUNNEL_POKE994		0x00994	/* 1, three times, clock gate held open */
+#define PORT_TUNNEL_CFG988		0x00988	/* 0, just before training starts */
+#define PORT_TUNNEL_CFG98C		0x0098c	/* read back */
 #define PORT_RID2SID			0x00828
 #define   PORT_RID2SID_VALID		BIT(31)
 #define   PORT_RID2SID_SID_SHIFT	16
@@ -1272,6 +1277,37 @@ static const struct hw_info t6000_pciec_hw = {
 		rmw_set((bits), port->base + (off));			\
 } while (0)
 
+#define tr(off) do {							\
+	if (apple_pcie_tunnel_dry_run)					\
+		dev_info(pcie->dev, "DRY R.4 %#07x\n", (unsigned int)(off)); \
+	else								\
+		readl_relaxed(port->base + (off));			\
+} while (0)
+
+#define TUNABLE(i) do {							\
+	if (apple_pcie_tunnel_dry_run)					\
+		dev_info(pcie->dev, "DRY tunable %d (%zu entries)\n", (i), \
+			 pcie->tunables[i].values ?			\
+				pcie->tunables[i].values->sz : 0);	\
+	else								\
+		apple_pcie_tunable_apply(&pcie->tunables[i]);		\
+} while (0)
+
+#define PORT_TUNABLE() do {						\
+	if (apple_pcie_tunnel_dry_run)					\
+		dev_info(pcie->dev, "DRY port tunable\n");		\
+	else								\
+		apple_pcie_tunable_apply(&port->tunable);		\
+} while (0)
+
+#define CLEAR_RID2SID() do {						\
+	if (apple_pcie_tunnel_dry_run)					\
+		dev_info(pcie->dev, "DRY clear %u RID/SID\n", sids);	\
+	else								\
+		for (int _i = 0; _i < sids; _i++)			\
+			apple_pcie_rid2sid_write(port, _i, 0);		\
+} while (0)
+
 #define tclr(bits, off) do {						\
 	if (apple_pcie_tunnel_dry_run)					\
 		dev_info(pcie->dev, "DRY RMW %#07x &= ~%#x\n",		\
@@ -1286,66 +1322,64 @@ static void apple_pcie_tunnel_port_init(struct apple_pcie *pcie,
 {
 	unsigned int sids = port->sid_map_sz ?: pcie->hw->max_rid2sid;
 
-	/* The two tunables macOS re-applies every time; "rc" it never writes. */
-	for (int i = 0; i < ARRAY_SIZE(pcie->tunables); i++) {
-		if (apple_pcie_tunnel_dry_run)
-			dev_info(pcie->dev, "DRY tunable %d (%zu entries)\n", i,
-				 pcie->tunables[i].values ?
-					pcie->tunables[i].values->sz : 0);
-		else
-			apple_pcie_tunable_apply(&pcie->tunables[i]);
-	}
+	/*
+	 * Transcribed write for write from the trace, including the plain
+	 * writes of whole values where a read-modify-write would have been the
+	 * obvious thing, and the three passes of poking 0x994 with the clock
+	 * gate held open. Diffing our own dry run against that trace is what
+	 * turned up everything that was missing here.
+	 */
+	TUNABLE(0);			/* debug */
+	TUNABLE(1);			/* fabric */
 
-	/* Take the port down. */
 	tw(PORT_TUNNEL_PRE_RESET, 0x110);
-	tw(PORT_INTSTAT, ~0);
-	tw(PORT_TUNNEL_CLRSTS, ~0);
-	tw(PORT_LINKCMDSTS, ~0);
-	tw(PORT_LTSSMCTL, 0);
-
-	if (apple_pcie_tunnel_dry_run)
-		dev_info(pcie->dev, "DRY clear %u RID/SID entries\n", sids);
-	else
-		for (int i = 0; i < sids; i++)
-			apple_pcie_rid2sid_write(port, i, 0);
-
-	tw(PORT_INTMSK, ~0);
-	tw(PORT_MSICFG, 0);
-	tw(PORT_MSIBASE, 0);
-	tw(pcie->hw->port_msiaddr, 0);
+	tw(PORT_INTSTAT, 0xffffffff);
+	tw(PORT_TUNNEL_CLRSTS, 0xffffffff);
+	tw(PORT_LINKCMDSTS, 0xffffffff);
+	tw(PORT_LTSSMCTL, 0x0);
+	tw(PORT_TUNNEL_CFG084, 0x0);
+	tw(PORT_INTMSK, 0xffffffff);
+	tw(PORT_MSICFG, 0x0);
+	tw(PORT_MSIBASE, 0x0);
+	tw(PORT_MSIADDR, 0x0);
 	tw(PORT_TUNNEL_CFG13C, 0x10);
-
-	tclr(PORT_APPCLK_EN, PORT_APPCLK);
-	tset(PORT_APPCLK_CGDIS, PORT_APPCLK);
+	tw(PORT_APPCLK, 0x100100);
 	tw(PORT_TUNNEL_CFG808, 0x100045);
-	tclr(PORT_REFCLK_EN, PORT_REFCLK);
-	tset(PORT_REFCLK_CGDIS, PORT_REFCLK);
-	tclr(PORT_PERST_OFF, pcie->hw->port_perst);
+	tw(PORT_REFCLK, 0x100);
+	tw(PORT_PERST, 0x0);
+
+	CLEAR_RID2SID();
 
 	tw(PORT_TUNNEL_CFG130, 0x208);
 	tw(PORT_TUNNEL_CFG140, 0x10);
 	tw(PORT_TUNNEL_CFG144, 0x253770);
-	tw(PORT_TUNNEL_CFG21C, 0);
-	tw(PORT_TUNNEL_CFG81C, 0);
+	tw(PORT_TUNNEL_CFG21C, 0x0);
+	tw(PORT_TUNNEL_CFG81C, 0x0);
+	tw(PORT_TUNNEL_CFG824, 0x0);
 
-	/* The port's own tunable sets bit 0 of the 0x10 just written. */
-	if (apple_pcie_tunnel_dry_run)
-		dev_info(pcie->dev, "DRY port tunable\n");
-	else
-		apple_pcie_tunable_apply(&port->tunable);
+	PORT_TUNABLE();			/* sets bit 0 of the 0x10 above */
 
-	/* And back up. */
-	tset(PORT_PERST_OFF, pcie->hw->port_perst);
-	tset(PORT_APPCLK_EN, PORT_APPCLK);
-	tclr(PORT_APPCLK_CGDIS, PORT_APPCLK);
-	tw(PORT_TUNNEL_ARM, 3);
+	tw(PORT_PERST, 0x1);
+	tw(PORT_APPCLK, 0x100101);
+	tw(PORT_APPCLK, 0x100001);
+	tw(PORT_TUNNEL_ARM, 0x3);
 
-	/* Put back the MSI configuration the reset above cleared. */
-	tw(PORT_INTSTAT, ~0);
-	tw(pcie->hw->port_msiaddr, lower_32_bits(DOORBELL_ADDR));
-	tw(PORT_MSIBASE, 0);
-	tw(PORT_MSICFG, (ilog2(pcie->nvecs) << PORT_MSICFG_L2MSINUM_SHIFT) |
-		       PORT_MSICFG_EN);
+	CLEAR_RID2SID();
+
+	tw(PORT_INTSTAT, 0x84aed00f);
+	tw(PORT_INTMSKCLR, 0x84aed00f);
+	tw(PORT_MSICFG, 0x51);
+	tw(PORT_MSIBASE, 0x0);
+	tw(PORT_MSIADDR, lower_32_bits(DOORBELL_ADDR));
+
+	for (int i = 0; i < 3; i++) {
+		tw(PORT_APPCLK, 0x100101);
+		tw(PORT_TUNNEL_POKE994, 0x1);
+		tw(PORT_APPCLK, 0x100001);
+	}
+
+	tw(PORT_TUNNEL_CFG988, 0x0);
+	tr(PORT_TUNNEL_CFG98C);
 
 	if (start_link) {
 		reinit_completion(&pcie->event);
