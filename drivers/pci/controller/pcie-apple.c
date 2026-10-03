@@ -1165,16 +1165,19 @@ static int apple_pcie_probe(struct platform_device *pdev)
 		return PTR_ERR(pcie->base);
 
 	/*
-	 * A tunnelled root complex comes out of reset unconfigured. Apple's
-	 * own boot chain programs these before anything touches the link, and
-	 * m1n1 copies them into the device tree for us.
+	 * Load the tunables but do not write anything here. macOS programs
+	 * them as the first step of bringing a tunnel up, not at boot, and
+	 * every attempt to write any of them at probe has ended in an
+	 * asynchronous SError before login. Probe touches exactly what it
+	 * touched before tunables existed; apple_pcie_tunnel_up() does the
+	 * writing, in macOS's order.
 	 */
 	if (hw->tunnelled) {
 		for (int i = 0; i < ARRAY_SIZE(apple_pcie_tunables); i++) {
 			ret = apple_pcie_load_tunable(pdev, dev->of_node,
 						apple_pcie_tunables[i].name,
 						apple_pcie_tunables[i].reg_name,
-						&pcie->tunables[i], true);
+						&pcie->tunables[i], false);
 			if (ret)
 				return ret;
 		}
