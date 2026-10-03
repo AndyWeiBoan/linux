@@ -201,9 +201,15 @@ MODULE_PARM_DESC(tunnel_init_at_probe,
  * an m1n1 hypervisor trace, so our sequence can be diffed against the trace of
  * macOS doing the same thing before any of it is let near the hardware.
  */
-static bool apple_pcie_tunnel_dry_run = true;
-module_param_named(tunnel_dry_run, apple_pcie_tunnel_dry_run, bool, 0644);
-MODULE_PARM_DESC(tunnel_dry_run, "Log the tunnel sequence instead of running it");
+#define DRY_PROBE	BIT(0)
+#define DRY_TUNNEL	BIT(1)
+static unsigned int apple_pcie_tunnel_dry = DRY_PROBE | DRY_TUNNEL;
+module_param_named(tunnel_dry_run, apple_pcie_tunnel_dry, uint, 0644);
+MODULE_PARM_DESC(tunnel_dry_run,
+		 "Log instead of run: bit 0 the pass at probe, bit 1 the pass when a tunnel arrives");
+
+/* Set for the duration of one pass, so the macros know which bit applies. */
+static bool apple_pcie_tunnel_dry_run;
 
 struct apple_pcie;
 struct apple_pcie_port;
@@ -1321,6 +1327,9 @@ static void apple_pcie_tunnel_port_init(struct apple_pcie *pcie,
 					bool start_link)
 {
 	unsigned int sids = port->sid_map_sz ?: pcie->hw->max_rid2sid;
+
+	apple_pcie_tunnel_dry_run =
+		apple_pcie_tunnel_dry & (start_link ? DRY_TUNNEL : DRY_PROBE);
 
 	/*
 	 * Transcribed write for write from the trace, including the plain
