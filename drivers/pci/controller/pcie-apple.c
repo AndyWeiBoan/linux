@@ -240,6 +240,22 @@ static bool apple_pcie_tunnel_dry_run;
  * we were doing, is simply wrong.
  */
 #define VARIANT_M1N1_PATH	BIT(3)
+/*
+ * bit 4: change only what the hardware is actually missing.
+ *
+ * Reading the ports back showed the firmware has already done nearly all of
+ * what the transcript does - 0x130, 0x13c, 0x144, 0x808, 0x124 and 0x168 all
+ * already hold the values macOS writes, on a boot where this driver wrote
+ * nothing at all. Replaying the sequence was undoing that.
+ *
+ * Against the internal controller, whose link is up, a tunnelled port differs
+ * in three places: PORT_REFCLK has its enable clear where the internal one has
+ * it set, 0x140 is missing the bit the port's own tunable sets, and 0x4020 is
+ * zero where macOS writes 3. The reference clock is the interesting one -
+ * apple_pcie_setup_refclk() is skipped for a tunnelled port, so nothing ever
+ * sets it.
+ */
+#define VARIANT_MINIMAL		BIT(4)
 
 /*
  * Read back the offsets the transcript writes, on whichever controller, to
@@ -1458,6 +1474,18 @@ static void apple_pcie_tunnel_port_init(struct apple_pcie *pcie,
 
 	apple_pcie_tunnel_dry_run =
 		apple_pcie_tunnel_dry & (start_link ? DRY_TUNNEL : DRY_PROBE);
+
+	if (apple_pcie_tunnel_variant & VARIANT_MINIMAL) {
+		tset(PORT_REFCLK_EN, PORT_REFCLK);
+		PORT_TUNABLE();			/* 0x140 bit 0 */
+		tw(PORT_TUNNEL_ARM, 0x3);
+
+		if (start_link) {
+			reinit_completion(&pcie->event);
+			tw(PORT_LTSSMCTL, PORT_LTSSMCTL_START);
+		}
+		return;
+	}
 
 	if (apple_pcie_tunnel_variant & VARIANT_M1N1_PATH) {
 		u32 stat;
