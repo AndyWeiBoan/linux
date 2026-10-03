@@ -682,12 +682,21 @@
 		reg = <0x7 0x30000000 0x0 0x10000000>,	/* config */
 			<0x7 0x20000000 0x0 0x4000>,	/* rc */
 			<0x7 0x21000000 0x0 0x8000>,	/* port0 */
-			<0x7 0x20004000 0x0 0x4000>,	/* phy0 */
-			<0x7 0x20200000 0x0 0x4000>,	/* fabric */
-			<0x7 0x2100c000 0x0 0x4000>,	/* ltssm0 */
-			<0x7 0x21010000 0x0 0x4000>;	/* phyip0 */
-		reg-names = "config", "rc", "port0", "phy0", "fabric",
-			"ltssm0", "phyip0";
+			<0x7 0x20004000 0x0 0x4000>,	/* fabric */
+			<0x7 0x20200000 0x0 0x4000>,	/* debug */
+			<0x7 0x2100c000 0x0 0x4000>,	/* unused */
+			<0x7 0x21010000 0x0 0x4000>;	/* unused */
+		/*
+		 * m1n1 hands us four tunables and names them, but not which
+		 * window each belongs to. "rc" and the port's own are their
+		 * obvious ones. "fabric" sits directly above the rc window,
+		 * where CORE_FABRIC_STAT lives inside the much larger rc
+		 * window of the on-package controller. That leaves the lone
+		 * window 2MB up as "debug". devm_apple_tunable_parse() bounds
+		 * checks each one against the window it is given.
+		 */
+		reg-names = "config", "rc", "port0", "fabric", "debug",
+			"unused0", "unused1";
 
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ DIE_NO 1197 IRQ_TYPE_LEVEL_HIGH>;
@@ -961,12 +970,21 @@
 		reg = <0xb 0x30000000 0x0 0x10000000>,	/* config */
 			<0xb 0x20000000 0x0 0x4000>,	/* rc */
 			<0xb 0x21000000 0x0 0x8000>,	/* port0 */
-			<0xb 0x20004000 0x0 0x4000>,	/* phy0 */
-			<0xb 0x20200000 0x0 0x4000>,	/* fabric */
-			<0xb 0x2100c000 0x0 0x4000>,	/* ltssm0 */
-			<0xb 0x21010000 0x0 0x4000>;	/* phyip0 */
-		reg-names = "config", "rc", "port0", "phy0", "fabric",
-			"ltssm0", "phyip0";
+			<0xb 0x20004000 0x0 0x4000>,	/* fabric */
+			<0xb 0x20200000 0x0 0x4000>,	/* debug */
+			<0xb 0x2100c000 0x0 0x4000>,	/* unused */
+			<0xb 0x21010000 0x0 0x4000>;	/* unused */
+		/*
+		 * m1n1 hands us four tunables and names them, but not which
+		 * window each belongs to. "rc" and the port's own are their
+		 * obvious ones. "fabric" sits directly above the rc window,
+		 * where CORE_FABRIC_STAT lives inside the much larger rc
+		 * window of the on-package controller. That leaves the lone
+		 * window 2MB up as "debug". devm_apple_tunable_parse() bounds
+		 * checks each one against the window it is given.
+		 */
+		reg-names = "config", "rc", "port0", "fabric", "debug",
+			"unused0", "unused1";
 
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ DIE_NO 1214 IRQ_TYPE_LEVEL_HIGH>;
@@ -1232,12 +1250,21 @@
 		reg = <0xf 0x30000000 0x0 0x10000000>,	/* config */
 			<0xf 0x20000000 0x0 0x4000>,	/* rc */
 			<0xf 0x21000000 0x0 0x8000>,	/* port0 */
-			<0xf 0x20004000 0x0 0x4000>,	/* phy0 */
-			<0xf 0x20200000 0x0 0x4000>,	/* fabric */
-			<0xf 0x2100c000 0x0 0x4000>,	/* ltssm0 */
-			<0xf 0x21010000 0x0 0x4000>;	/* phyip0 */
-		reg-names = "config", "rc", "port0", "phy0", "fabric",
-			"ltssm0", "phyip0";
+			<0xf 0x20004000 0x0 0x4000>,	/* fabric */
+			<0xf 0x20200000 0x0 0x4000>,	/* debug */
+			<0xf 0x2100c000 0x0 0x4000>,	/* unused */
+			<0xf 0x21010000 0x0 0x4000>;	/* unused */
+		/*
+		 * m1n1 hands us four tunables and names them, but not which
+		 * window each belongs to. "rc" and the port's own are their
+		 * obvious ones. "fabric" sits directly above the rc window,
+		 * where CORE_FABRIC_STAT lives inside the much larger rc
+		 * window of the on-package controller. That leaves the lone
+		 * window 2MB up as "debug". devm_apple_tunable_parse() bounds
+		 * checks each one against the window it is given.
+		 */
+		reg-names = "config", "rc", "port0", "fabric", "debug",
+			"unused0", "unused1";
 
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ DIE_NO 1231 IRQ_TYPE_LEVEL_HIGH>;

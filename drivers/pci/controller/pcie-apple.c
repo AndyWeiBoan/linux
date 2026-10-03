@@ -30,6 +30,7 @@
 #include <linux/msi.h>
 #include <linux/of_irq.h>
 #include <linux/pci-ecam.h>
+#include <linux/soc/apple/tunable.h>
 
 #include "pci-host-common.h"
 
@@ -216,6 +217,53 @@ struct apple_pcie {
 	struct irq_fwspec	fwspec;
 	u32			nvecs;
 };
+
+/*
+ * Apple hands these down through the device tree and they have to be applied
+ * before anything tries to train a link. @name is the tunable property;
+ * @reg_name is the register window it goes to, which the device tree names.
+ */
+static const struct {
+	const char *name;
+	const char *reg_name;
+} apple_pcie_tunables[] = {
+	{ "apple,tunable-debug",  "debug"  },
+	{ "apple,tunable-fabric", "fabric" },
+	{ "apple,tunable-rc",     "rc"     },
+};
+
+static int apple_pcie_apply_tunables(struct platform_device *pdev,
+				     struct device_node *np,
+				     const char *prop, const char *reg_name)
+{
+	struct device *dev = &pdev->dev;
+	struct apple_tunable *tunable;
+	void __iomem *regs;
+	struct resource *res;
+
+	if (!of_property_present(np, prop))
+		return 0;
+
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, reg_name);
+	if (!res)
+		return dev_err_probe(dev, -ENOENT, "no '%s' window for %s\n",
+				     reg_name, prop);
+
+	tunable = devm_apple_tunable_parse(dev, np, prop, res);
+	if (IS_ERR(tunable))
+		return dev_err_probe(dev, PTR_ERR(tunable),
+				     "cannot parse %s\n", prop);
+
+	regs = devm_ioremap_resource(dev, res);
+	if (IS_ERR(regs))
+		return PTR_ERR(regs);
+
+	apple_tunable_apply(regs, tunable);
+	dev_info(dev, "applied %s (%zu entries) to %s\n", prop, tunable->sz,
+		 reg_name);
+
+	return 0;
+}
 
 struct apple_pcie_port {
 	raw_spinlock_t		lock;
@@ -731,12 +779,25 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 	if (IS_ERR(port->base))
 		return PTR_ERR(port->base);
 
+	if (pcie->hw->tunnelled) {
+		snprintf(name, sizeof(name), "port%d", port->idx);
+		ret = apple_pcie_apply_tunables(platform, np, "apple,tunable",
+						name);
+		if (ret)
+			return ret;
+	}
+
 	snprintf(name, sizeof(name), "phy%d", port->idx);
 	res = platform_get_resource_byname(platform, IORESOURCE_MEM, name);
 	if (res)
 		port->phy = devm_ioremap_resource(&platform->dev, res);
-	else
+	else if (!pcie->hw->tunnelled)
 		port->phy = pcie->base + CORE_PHY_DEFAULT_BASE(port->idx);
+	/*
+	 * A tunnelled root complex has no PCIe PHY of its own - the ATC PHY
+	 * owns the lanes - so there is no window to fall back to and nothing
+	 * below dereferences this.
+	 */
 
 	/* link might be already brought up by u-boot, skip setup then */
 	link_stat = readl_relaxed(port->base + PORT_LINKSTS);
@@ -1050,6 +1111,21 @@ static int apple_pcie_probe(struct platform_device *pdev)
 	pcie->base = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(pcie->base))
 		return PTR_ERR(pcie->base);
+
+	/*
+	 * A tunnelled root complex comes out of reset unconfigured. Apple's
+	 * own boot chain programs these before anything touches the link, and
+	 * m1n1 copies them into the device tree for us.
+	 */
+	if (hw->tunnelled) {
+		for (int i = 0; i < ARRAY_SIZE(apple_pcie_tunables); i++) {
+			ret = apple_pcie_apply_tunables(pdev, dev->of_node,
+						apple_pcie_tunables[i].name,
+						apple_pcie_tunables[i].reg_name);
+			if (ret)
+				return ret;
+		}
+	}
 
 	mutex_init(&pcie->lock);
 	INIT_LIST_HEAD(&pcie->ports);
