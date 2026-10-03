@@ -283,9 +283,14 @@ static int apple_pcie_load_tunable(struct platform_device *pdev,
 		return dev_err_probe(dev, PTR_ERR(tunable),
 				     "cannot parse %s\n", prop);
 
-	regs = devm_ioremap_resource(dev, res);
-	if (IS_ERR(regs))
-		return PTR_ERR(regs);
+	/*
+	 * Map without claiming the region: "rc" and "port0" are already mapped
+	 * and owned elsewhere in this driver, and requesting them a second time
+	 * fails the whole probe with -EBUSY.
+	 */
+	regs = devm_ioremap(dev, res->start, resource_size(res));
+	if (!regs)
+		return -ENOMEM;
 
 	out->values = tunable;
 	out->regs = regs;
