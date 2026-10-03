@@ -114,6 +114,21 @@ MODULE_PARM_DESC(link_up_timeout, "PCIe link training timeout in milliseconds");
 #define   PORT_REFCLK_CGDIS		BIT(8)
 #define PORT_PERST			0x00814
 #define   PORT_PERST_OFF		BIT(0)
+/*
+ * Registers that only show up in a trace of macOS bringing a tunnelled link
+ * up (traces/macos-apciec in the asahi-dp-altmode tree). The names say what
+ * they are used for here, not what Apple calls them.
+ */
+#define PORT_TUNNEL_PRE_RESET		0x0008c	/* 0x110, first write of all */
+#define PORT_TUNNEL_CLRSTS		0x00148	/* cleared with ~0 alongside INTSTAT */
+#define PORT_TUNNEL_CFG130		0x00130	/* 0x208 */
+#define PORT_TUNNEL_CFG13C		0x0013c	/* 0x10 */
+#define PORT_TUNNEL_CFG140		0x00140	/* 0x10, then the port tunable sets bit 0 */
+#define PORT_TUNNEL_CFG144		0x00144	/* 0x253770 */
+#define PORT_TUNNEL_CFG21C		0x0021c	/* 0 */
+#define PORT_TUNNEL_CFG808		0x00808	/* 0x100045 */
+#define PORT_TUNNEL_CFG81C		0x0081c	/* 0 */
+#define PORT_TUNNEL_ARM			0x04020	/* 3, once the clocks are back on */
 #define PORT_RID2SID			0x00828
 #define   PORT_RID2SID_VALID		BIT(31)
 #define   PORT_RID2SID_SID_SHIFT	16
@@ -206,6 +221,12 @@ static const struct hw_info t602x_hw = {
 	.max_rid2sid		= 512,
 };
 
+/* A parsed tunable together with the window it is applied to. */
+struct apple_pcie_tunable {
+	struct apple_tunable *values;
+	void __iomem *regs;
+};
+
 struct apple_pcie {
 	struct mutex		lock;
 	struct device		*dev;
@@ -216,6 +237,7 @@ struct apple_pcie {
 	struct completion	event;
 	struct irq_fwspec	fwspec;
 	u32			nvecs;
+	struct apple_pcie_tunable tunables[3];
 };
 
 /*
@@ -232,9 +254,16 @@ static const struct {
 	{ "apple,tunable-rc",     "rc"     },
 };
 
-static int apple_pcie_apply_tunables(struct platform_device *pdev,
-				     struct device_node *np,
-				     const char *prop, const char *reg_name)
+static void apple_pcie_tunable_apply(const struct apple_pcie_tunable *t)
+{
+	if (t->values && t->regs)
+		apple_tunable_apply(t->regs, t->values);
+}
+
+static int apple_pcie_load_tunable(struct platform_device *pdev,
+				   struct device_node *np,
+				   const char *prop, const char *reg_name,
+				   struct apple_pcie_tunable *out)
 {
 	struct device *dev = &pdev->dev;
 	struct apple_tunable *tunable;
@@ -258,7 +287,9 @@ static int apple_pcie_apply_tunables(struct platform_device *pdev,
 	if (IS_ERR(regs))
 		return PTR_ERR(regs);
 
-	apple_tunable_apply(regs, tunable);
+	out->values = tunable;
+	out->regs = regs;
+	apple_pcie_tunable_apply(out);
 	dev_info(dev, "applied %s (%zu entries) to %s\n", prop, tunable->sz,
 		 reg_name);
 
@@ -276,6 +307,7 @@ struct apple_pcie_port {
 	unsigned long		*sid_map;
 	int			sid_map_sz;
 	int			idx;
+	struct apple_pcie_tunable tunable;
 };
 
 static void rmw_set(u32 set, void __iomem *addr)
@@ -781,8 +813,8 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 
 	if (pcie->hw->tunnelled) {
 		snprintf(name, sizeof(name), "port%d", port->idx);
-		ret = apple_pcie_apply_tunables(platform, np, "apple,tunable",
-						name);
+		ret = apple_pcie_load_tunable(platform, np, "apple,tunable",
+					      name, &port->tunable);
 		if (ret)
 			return ret;
 	}
@@ -841,13 +873,14 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 	link_stat = readl_relaxed(port->base + PORT_LINKSTS);
 	if (!(link_stat & PORT_LINKSTS_UP) && pcie->hw->tunnelled) {
 		/*
-		 * Nothing is going to answer until a cable is plugged in and a
-		 * tunnel is built, which is minutes or hours away, not
-		 * milliseconds. Arm the link and leave: the link-up interrupt
-		 * is what tells us a tunnel arrived. Waiting here only delays
-		 * the rest of the boot by link_up_timeout per controller.
+		 * Leave the link alone. Nothing is going to answer until a
+		 * cable is plugged in and a tunnel is built, and macOS does
+		 * not arm training early either: it takes the port down and
+		 * brings it back when the tunnel arrives, starting training
+		 * last. apple_pcie_tunnel_up() does the same. Starting it here
+		 * only delays the boot and leaves the link in a state that
+		 * never comes up.
 		 */
-		writel_relaxed(PORT_LTSSMCTL_START, port->base + PORT_LTSSMCTL);
 	} else if (!(link_stat & PORT_LINKSTS_UP)) {
 		unsigned long timeout, left;
 		/* start link training */
@@ -1119,9 +1152,10 @@ static int apple_pcie_probe(struct platform_device *pdev)
 	 */
 	if (hw->tunnelled) {
 		for (int i = 0; i < ARRAY_SIZE(apple_pcie_tunables); i++) {
-			ret = apple_pcie_apply_tunables(pdev, dev->of_node,
+			ret = apple_pcie_load_tunable(pdev, dev->of_node,
 						apple_pcie_tunables[i].name,
-						apple_pcie_tunables[i].reg_name);
+						apple_pcie_tunables[i].reg_name,
+						&pcie->tunables[i]);
 			if (ret)
 				return ret;
 		}
@@ -1181,21 +1215,81 @@ int apple_pcie_tunnel_up(struct platform_device *pdev)
 	if (!port)
 		return -ENODEV;
 
-	link_stat = readl_relaxed(port->base + PORT_LINKSTS);
+	/*
+	 * macOS does not simply poke the link when a tunnel shows up: it takes
+	 * the port all the way down and brings it back, and only starts link
+	 * training at the very end. The order below is transcribed from a trace
+	 * of it doing exactly that (traces/macos-apciec in the asahi-dp-altmode
+	 * tree), down to the writes whose meaning we do not know.
+	 *
+	 * Starting training at probe the way a non-tunnelled port does leaves
+	 * the link stuck: the hardware acknowledges the attempt - PORT_STATUS
+	 * picks up a bit, PORT_LINKSTS changes - and never comes up.
+	 */
 	dev_info(pcie->dev, "tunnel up: status 0x%08x, link 0x%08x\n",
-		 readl_relaxed(port->base + PORT_STATUS), link_stat);
+		 readl_relaxed(port->base + PORT_STATUS),
+		 readl_relaxed(port->base + PORT_LINKSTS));
 
-	if (!(link_stat & PORT_LINKSTS_UP)) {
-		reinit_completion(&pcie->event);
-		writel_relaxed(PORT_LTSSMCTL_START,
-			       port->base + PORT_LTSSMCTL);
+	/* The two tunables macOS re-applies on every plug; "rc" it does not. */
+	apple_pcie_tunable_apply(&pcie->tunables[0]);	/* debug */
+	apple_pcie_tunable_apply(&pcie->tunables[1]);	/* fabric */
 
-		timeout = link_up_timeout * HZ / 1000;
-		left = wait_for_completion_timeout(&pcie->event, timeout);
-		link_stat = readl_relaxed(port->base + PORT_LINKSTS);
-		dev_info(pcie->dev, "re-armed link training: link 0x%08x%s\n",
-			 link_stat, left ? "" : " (timed out)");
-	}
+	/* Take the port down. */
+	writel_relaxed(0x110, port->base + PORT_TUNNEL_PRE_RESET);
+	writel_relaxed(~0, port->base + PORT_INTSTAT);
+	writel_relaxed(~0, port->base + PORT_TUNNEL_CLRSTS);
+	writel_relaxed(~0, port->base + PORT_LINKCMDSTS);
+	writel_relaxed(0, port->base + PORT_LTSSMCTL);
+
+	for (int i = 0; i < port->sid_map_sz; i++)
+		apple_pcie_rid2sid_write(port, i, 0);
+
+	writel_relaxed(~0, port->base + PORT_INTMSK);
+	writel_relaxed(0, port->base + PORT_MSICFG);
+	writel_relaxed(0, port->base + PORT_MSIBASE);
+	writel_relaxed(0, port->base + pcie->hw->port_msiaddr);
+	writel_relaxed(0x10, port->base + PORT_TUNNEL_CFG13C);
+
+	rmw_clear(PORT_APPCLK_EN, port->base + PORT_APPCLK);
+	rmw_set(PORT_APPCLK_CGDIS, port->base + PORT_APPCLK);
+	writel_relaxed(0x100045, port->base + PORT_TUNNEL_CFG808);
+	rmw_clear(PORT_REFCLK_EN, port->base + PORT_REFCLK);
+	rmw_set(PORT_REFCLK_CGDIS, port->base + PORT_REFCLK);
+	rmw_clear(PORT_PERST_OFF, port->base + pcie->hw->port_perst);
+
+	writel_relaxed(0x208, port->base + PORT_TUNNEL_CFG130);
+	writel_relaxed(0x10, port->base + PORT_TUNNEL_CFG140);
+	writel_relaxed(0x253770, port->base + PORT_TUNNEL_CFG144);
+	writel_relaxed(0, port->base + PORT_TUNNEL_CFG21C);
+	writel_relaxed(0, port->base + PORT_TUNNEL_CFG81C);
+
+	/* The port's own tunable sets bit 0 of the 0x10 just written. */
+	apple_pcie_tunable_apply(&port->tunable);
+
+	/* And back up. */
+	rmw_set(PORT_PERST_OFF, port->base + pcie->hw->port_perst);
+	rmw_set(PORT_APPCLK_EN, port->base + PORT_APPCLK);
+	rmw_clear(PORT_APPCLK_CGDIS, port->base + PORT_APPCLK);
+	writel_relaxed(3, port->base + PORT_TUNNEL_ARM);
+
+	/* Put back the MSI configuration the reset above cleared. */
+	writel_relaxed(~0, port->base + PORT_INTSTAT);
+	writel_relaxed(lower_32_bits(DOORBELL_ADDR),
+		       port->base + pcie->hw->port_msiaddr);
+	writel_relaxed(0, port->base + PORT_MSIBASE);
+	writel_relaxed((ilog2(pcie->nvecs) << PORT_MSICFG_L2MSINUM_SHIFT) |
+		       PORT_MSICFG_EN, port->base + PORT_MSICFG);
+
+	/* Only now. */
+	reinit_completion(&pcie->event);
+	writel_relaxed(PORT_LTSSMCTL_START, port->base + PORT_LTSSMCTL);
+
+	timeout = link_up_timeout * HZ / 1000;
+	left = wait_for_completion_timeout(&pcie->event, timeout);
+	link_stat = readl_relaxed(port->base + PORT_LINKSTS);
+	dev_info(pcie->dev, "after bring-up: status 0x%08x, link 0x%08x%s\n",
+		 readl_relaxed(port->base + PORT_STATUS), link_stat,
+		 left ? "" : " (timed out)");
 
 	if (!(link_stat & PORT_LINKSTS_UP))
 		return -ENODEV;
