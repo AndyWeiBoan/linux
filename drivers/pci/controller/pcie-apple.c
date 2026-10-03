@@ -1677,9 +1677,21 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 	if (!(link_stat & PORT_LINKSTS_UP)) {
 		unsigned long timeout, left = 0;
 		int attempt, attempts = 1;
+		u32 link_events = BIT(PORT_INT_LINK_UP) |
+				  BIT(PORT_INT_LINK_DOWN) |
+				  BIT(PORT_INT_TUNNEL_ERR);
 
 		if (pcie->hw->tunneled) {
-			if (pcie->kernel_init) {
+			/*
+			 * A re-plug lands here with the port already cold
+			 * initialised, but the LTSSM only trains on its own
+			 * for the first cable insertion after boot. Every
+			 * later insertion needs the tunables re-applied and
+			 * more than one attempt, exactly as M1 does -- gate
+			 * this on tunnel_cold_init too, not just kernel_init,
+			 * or T600x gets a single 500ms try and gives up.
+			 */
+			if (pcie->kernel_init || pcie->tunnel_cold_init) {
 				apple_pcie_tunnel_apply_tunable(port->base,
 								port->tunable);
 				udelay(10);
@@ -1697,11 +1709,24 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 		for (attempt = 0; attempt < attempts; attempt++) {
 			if (attempt)
 				reinit_completion(&pcie->event);
+			/*
+			 * A link event latched by the previous cable cycle
+			 * keeps the next one from being reported, the same
+			 * hazard apple_pcie_tunnel_start() clears before each
+			 * LTSSM start.
+			 */
+			apple_pcie_port_writel(port, link_events, PORT_INTSTAT);
 			apple_pcie_port_writel(port, PORT_LTSSMCTL_START,
 					       PORT_LTSSMCTL);
 			left = wait_for_completion_timeout(&pcie->event, timeout);
 			if (left)
 				break;
+			if (apple_pcie_port_readl(port, PORT_LINKSTS) &
+			    PORT_LINKSTS_UP) {
+				/* Trained without an interrupt reaching us. */
+				left = 1;
+				break;
+			}
 			dev_warn(pcie->dev, "%pOF link didn't come up\n", np);
 		}
 		if (left)
