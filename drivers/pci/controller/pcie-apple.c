@@ -191,7 +191,7 @@ MODULE_PARM_DESC(link_up_timeout, "PCIe link training timeout in milliseconds");
  * not, but it is the one thing about the port's state that changed between a
  * plug that worked and a plug that kills the machine, so keep it switchable.
  */
-static bool apple_pcie_tunnel_init_at_probe = true;
+static bool apple_pcie_tunnel_init_at_probe;
 module_param_named(tunnel_init_at_probe, apple_pcie_tunnel_init_at_probe, bool, 0444);
 MODULE_PARM_DESC(tunnel_init_at_probe,
 		 "Run macOS's boot-time init on a tunnelled port at probe");
@@ -793,11 +793,16 @@ static int apple_pcie_setup_link(struct apple_pcie *pcie,
 	 */
 	if (pcie->hw->tunnelled) {
 		/*
-		 * Nothing to sequence here: apple_pcie_tunnel_port_init() runs
-		 * the whole thing at the end of setup, the way macOS does.
-		 *
-		 * Kept for the register dump only.
+		 * Give the port its clock and take it out of reset, which is
+		 * what everything after this in setup expects. Removing this
+		 * - on the grounds that the transcribed sequence does it later
+		 * anyway - left every step in between running against a port
+		 * that had neither, which is its own way to take the machine
+		 * down and took a while to notice.
 		 */
+		rmw_set(PORT_APPCLK_EN, port->base + PORT_APPCLK);
+		rmw_set(PORT_PERST_OFF, port->base + pcie->hw->port_perst);
+
 		ret = readl_relaxed_poll_timeout(port->base + PORT_STATUS, stat,
 						 stat & PORT_STATUS_READY,
 						 100, 250000);
@@ -1001,6 +1006,9 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 		 */
 		if (apple_pcie_tunnel_init_at_probe)
 			apple_pcie_tunnel_port_init(pcie, port, false);
+		else
+			writel_relaxed(PORT_LTSSMCTL_START,
+				       port->base + PORT_LTSSMCTL);
 	} else if (!(link_stat & PORT_LINKSTS_UP)) {
 		unsigned long timeout, left;
 		/* start link training */
