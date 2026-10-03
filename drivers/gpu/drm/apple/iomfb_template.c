@@ -4,6 +4,7 @@
  * Copyright The Asahi Linux Contributors
  */
 
+#include <clocksource/arm_arch_timer.h>
 #include <linux/align.h>
 #include <linux/bitmap.h>
 #include <linux/clk.h>
@@ -33,6 +34,9 @@
 
 /* Register defines used in bandwidth setup structure */
 #define REG_DOORBELL_BIT(idx) (2 + (idx))
+
+static_assert(offsetof(struct DCP_FW_NAME(dcp_swap), timestamp[6]) == 0x30);
+static_assert(offsetof(struct DCP_FW_NAME(dcp_swap), flags1) == 0x40);
 
 struct dcp_wait_cookie {
 	struct kref refcount;
@@ -122,6 +126,7 @@ static void dcpep_cb_swap_complete(struct apple_dcp *dcp,
 	ktime_t now = ktime_get();
 	trace_iomfb_swap_complete(dcp, resp->swap_id);
 	dcp->last_swap_id = resp->swap_id;
+	dcp_swap_watchdog_complete(dcp);
 
 	dcp_drm_crtc_page_flip(dcp, now);
 	if (dcp->crc_enabled) {
@@ -457,15 +462,7 @@ dcpep_cb_map_physical(struct apple_dcp *dcp, struct dcp_map_physical_req *req)
 
 static u64 dcpep_cb_get_frequency(struct apple_dcp *dcp)
 {
-	u64 rate;
-
-	if (dcp_frequency_override > 0)
-		rate = (u64)dcp_frequency_override;
-	else
-		rate = clk_get_rate(dcp->clk);
-
-	dev_info(dcp->dev, "get_frequency -> %llu\n", rate);
-	return rate;
+	return clk_get_rate(dcp->clk);
 }
 
 static struct DCP_FW_NAME(dcp_map_reg_resp) dcpep_cb_map_reg(struct apple_dcp *dcp,
@@ -478,10 +475,6 @@ static struct DCP_FW_NAME(dcp_map_reg_resp) dcpep_cb_map_reg(struct apple_dcp *d
 		return (struct DCP_FW_NAME(dcp_map_reg_resp)){ .ret = 1 };
 	} else {
 		struct resource *rsrc = dcp->disp_registers[req->index];
-
-		dev_info(dcp->dev, "map_reg[%u] = %pa len %llu (have %u)\n",
-			 req->index, &rsrc->start,
-			 (u64)resource_size(rsrc), dcp->nr_disp_registers);
 #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
 		dma_addr_t dva = dma_map_resource(dcp->dev, rsrc->start, resource_size(rsrc),
 						  DMA_BIDIRECTIONAL, 0);
@@ -501,8 +494,12 @@ static struct DCP_FW_NAME(dcp_map_reg_resp) dcpep_cb_map_reg(struct apple_dcp *d
 static struct dcp_read_edt_data_resp
 dcpep_cb_read_edt_data(struct apple_dcp *dcp, struct dcp_read_edt_data_req *req)
 {
-	dev_info(dcp->dev, "read_edt_data(key='%.*s' count=%u) -> echo %u\n",
-		 (int)sizeof(req->key), req->key, req->count, req->value[0]);
+	/* Observe boot-property requests without inventing firmware timings. */
+	if (dcp->fixed_connector_type != DRM_MODE_CONNECTOR_eDP)
+		dev_info(dcp->dev,
+			 "read_edt_data key=%.*s count=%u default0=%#x ret=0\n",
+			 (int)sizeof(req->key), req->key, req->count,
+			 req->value[0]);
 
 	return (struct dcp_read_edt_data_resp){
 		.value[0] = req->value[0],
@@ -531,7 +528,7 @@ static u8 dcpep_cb_prop_start(struct apple_dcp *dcp, u32 *length)
 	}
 
 	dcp->chunks.length = *length;
-	dcp->chunks.data = devm_kzalloc(dcp->dev, *length, GFP_KERNEL);
+	dcp->chunks.data = kzalloc(*length, GFP_KERNEL);
 
 	if (!dcp->chunks.data) {
 		dev_warn(dcp->dev, "failed to allocate chunks\n");
@@ -582,7 +579,9 @@ static bool dcpep_process_chunks(struct apple_dcp *dcp,
 	if (!strcmp(req->key, "TimingElements")) {
 		dcp->modes = enumerate_modes(&ctx, &dcp->nr_modes,
 					     dcp->width_mm, dcp->height_mm,
-					     dcp->notch_height);
+					     dcp->notch_height,
+					     dcp->fixed_connector_type ==
+						     DRM_MODE_CONNECTOR_eDP);
 
 		if (IS_ERR(dcp->modes)) {
 			dev_warn(dcp->dev, "failed to parse modes\n");
@@ -611,6 +610,12 @@ static u8 dcpep_cb_prop_end(struct apple_dcp *dcp,
 			    struct dcp_set_dcpav_prop_end_req *req)
 {
 	u8 resp = dcpep_process_chunks(dcp, req);
+
+	if (dcp->fixed_connector_type != DRM_MODE_CONNECTOR_eDP)
+		dev_info(dcp->dev,
+			 "DCP property key=%.*s bytes=%zu accepted=%u nr_modes=%u\n",
+			 (int)sizeof(req->key), req->key, dcp->chunks.length,
+			 resp, dcp->nr_modes);
 
 	/* move chunked data to connector to provide it via debugfs */
 	dcp_connector_update_dict(dcp->connector, req->key, &dcp->chunks);
@@ -941,15 +946,21 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
 
 	dcp_swap_start(dcp, false, &swap_req, dcp_swap_clear_started, cookie);
 
-	ret = wait_for_completion_timeout(&cookie->done, msecs_to_jiffies(50));
+	/*
+	 * On unplug the firmware powers the external pipe down on its own and
+	 * can take tens of milliseconds before it answers (and swallows) the
+	 * clear swap. That is not a crash: a real one is reported through the
+	 * RTKit crash callback. Wait longer and carry on with the power-off
+	 * either way, otherwise every later modeset fails with -EINVAL.
+	 */
+	ret = wait_for_completion_timeout(&cookie->done, msecs_to_jiffies(500));
 	swap_id = cookie->swap_id;
 	kref_put(&cookie->refcount, release_swap_cookie);
-	if (ret <= 0) {
-		dcp->crashed = true;
-		return;
-	}
-
-	dev_dbg(dcp->dev, "%s: clear swap submitted: %u\n", __func__, swap_id);
+	if (ret <= 0)
+		dev_warn(dcp->dev, "%s: clear swap timed out\n", __func__);
+	else
+		dev_dbg(dcp->dev, "%s: clear swap submitted: %u\n", __func__,
+			swap_id);
 
 	poff_cookie = kzalloc(sizeof(*poff_cookie), GFP_KERNEL);
 	if (!poff_cookie)
@@ -1024,6 +1035,7 @@ void DCP_FW_NAME(iomfb_sleep)(struct apple_dcp *dcp)
 static void dcpep_cb_hotplug(struct apple_dcp *dcp, u64 *connected)
 {
 	struct apple_connector *connector = dcp->connector;
+	unsigned int action;
 
 	/* DCP issues hotplug_gated callbacks after SetPowerState() calls on
 	 * devices with display (macbooks, imacs). This must not result in
@@ -1034,30 +1046,42 @@ static void dcpep_cb_hotplug(struct apple_dcp *dcp, u64 *connected)
 	 */
 	if (dcp->main_display)
 		return;
+	/*
+	 * Report firmware hotplug independently of the USB4 PHY experiment.
+	 * Reassigning lpdptxphy blanked eDP even with these callbacks ignored;
+	 * suppressing connector notifications does not protect the panel.
+	 * Mode probing still uses this DCP's firmware modes, and mode_valid
+	 * rejects modes absent from that list. Do not synthesize a mode here.
+	 */
 
-	if (dcp->during_modeset) {
-		dev_info(dcp->dev,
-			 "cb_hotplug() ignored during modeset connected:%llu\n",
-			 *connected);
+	/*
+	 * Same for the unplug a Type-C output reports after its CRTC was
+	 * powered off with the cable still attached (see dcp_poweroff()).
+	 */
+	if (!(*connected) && READ_ONCE(dcp->typec_crtc_off) &&
+	    READ_ONCE(dcp->typec_cable_connected)) {
+		dev_dbg(dcp->dev, "cb_hotplug() ignoring unplug of powered-off Type-C output\n");
+		dcp_mode_invalidate(&dcp->mode_state);
+		schedule_work(&dcp->vblank_wq);
 		return;
 	}
+	if (dcp_is_typec_output(dcp) && *connected && dcp->nr_modes)
+		complete_all(&dcp->typec_iomfb_hpd_ready);
 
-	dev_info(dcp->dev, "cb_hotplug() connected:%llu, valid_mode:%d\n",
-		 *connected, dcp->valid_mode);
-
-	/* Hotplug invalidates mode. DRM doesn't always handle this. */
-	if (!(*connected)) {
-		dcp->valid_mode = false;
-		/* after unplug swap will not complete until the next
-		 * set_digital_out_mode */
-		schedule_work(&dcp->vblank_wq);
+	action = dcp_mode_hotplug(&dcp->mode_state, !!(*connected),
+				  connector ? &connector->connected : NULL);
+	/*
+	 * A Type-C sink can assert HPD only after a modeset has already failed,
+	 * as a TV behind a DP-to-HDMI converter does when it wakes from standby.
+	 * The connector state does not change then; re-apply the mode anyway.
+	 */
+	if (*connected && dcp_is_typec_output(dcp) &&
+	    !READ_ONCE(dcp->mode_state.valid) &&
+	    !READ_ONCE(dcp->mode_state.changing)) {
+		dcp->swap_watchdog_retrains = 0;
+		action |= DCP_HOTPLUG_NOTIFY;
 	}
-
-	if (connector && connector->connected != !!(*connected)) {
-		connector->connected = !!(*connected);
-		dcp->valid_mode = false;
-		schedule_work(&connector->hotplug_wq);
-	}
+	dcp_handle_hotplug_actions(dcp, action);
 }
 
 static void
@@ -1159,6 +1183,8 @@ static void dcp_swapped(struct apple_dcp *dcp, void *data, void *cookie)
 		return;
 	}
 	dcp->swap_start = ktime_get();
+	dcp->swap_submit_timestamp = arch_timer_read_counter();
+	dcp_swap_watchdog_arm(dcp);
 
 	while (!list_empty(&dcp->swapped_out_fbs)) {
 		struct dcp_fb_reference *entry;
@@ -1188,7 +1214,8 @@ static void do_swap(struct apple_dcp *dcp, void *data, void *cookie)
 {
 	struct dcp_swap_start_req start_req = { 0 };
 
-	if (dcp->connector && dcp->connector->connected)
+	if (READ_ONCE(dcp->mode_state.valid) && dcp->connector &&
+	    READ_ONCE(dcp->connector->connected))
 		dcp_swap_start(dcp, false, &start_req, dcp_swap_started, NULL);
 	else
 		dcp_drm_crtc_vblank(dcp->crtc);
@@ -1203,6 +1230,35 @@ static void complete_set_digital_out_mode(struct apple_dcp *dcp, void *data,
 		complete(&wait->done);
 		kref_put(&wait->refcount, release_wait_cookie);
 	}
+}
+
+/* DCP applies Adaptive Sync changes when the display mode is reselected. */
+static void dcp_on_set_adaptive_sync(struct apple_dcp *dcp, void *out,
+				     void *cookie)
+{
+	dcp_set_digital_out_mode(dcp, false, &dcp->mode,
+				 complete_set_digital_out_mode, cookie);
+}
+
+static void dcp_set_adaptive_sync(struct apple_dcp *dcp, u32 min_vrr,
+				  void *cookie)
+{
+	struct dcp_set_parameter_dcp param = {
+		.param = IOMFBPARAM_ADAPTIVE_SYNC,
+		.value = {
+			min_vrr, /* minRR, 16.16 fixed-point Hz */
+			0,       /* mediaTargetRate */
+			0,       /* fractional rate */
+		},
+#if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+		.count = 3,
+#else
+		.count = 1,
+#endif
+	};
+
+	dcp_set_parameter_dcp(dcp, false, &param, dcp_on_set_adaptive_sync,
+			      cookie);
 }
 
 int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
@@ -1244,24 +1300,8 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 		.timing_mode_id = mode->timing_mode_id
 	};
 
-	/*
-	 * The timing table the DCP builds for a Studio Display over a
-	 * Thunderbolt tunnel stops at id 40 (2560x2880, one tile) and has no
-	 * 5K entry, while macOS on the same machine drives
-	 *   set_digital_out_mode(colorID 48, timingID 43) -> 5120x2880 DSC=YES
-	 * The id may still exist inside the firmware, so allow asking for it
-	 * directly. -1 leaves the parsed value alone.
-	 */
-	if (dcp_force_timing_id >= 0)
-		dcp->mode.timing_mode_id = dcp_force_timing_id;
-	if (dcp_force_color_id >= 0)
-		dcp->mode.color_mode_id = dcp_force_color_id;
-	if (dcp_force_timing_id >= 0 || dcp_force_color_id >= 0)
-		dev_info(dcp->dev, "forcing color:%u timing:%u\n",
-			 dcp->mode.color_mode_id, dcp->mode.timing_mode_id);
-
-	/* Keep track of suspected vrr modes */
-	dcp->use_timestamps = mode->vrr;
+	/* Built-in ProMotion panels require timestamps even in fixed-120 mode. */
+	dcp->use_timestamps = mode->vrr && dcp->main_display;
 
 	cookie = kzalloc(sizeof(*cookie), GFP_KERNEL);
 	if (!cookie) {
@@ -1273,10 +1313,15 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 	/* increase refcount to ensure the receiver has a reference */
 	kref_get(&cookie->refcount);
 
-	dcp->during_modeset = true;
+	dcp->swap_submit_timestamp = 0;
 
-	dcp_set_digital_out_mode(dcp, false, &dcp->mode,
-				 complete_set_digital_out_mode, cookie);
+	if (mode->vrr)
+		dcp_set_adaptive_sync(dcp,
+				      crtc_state->vrr_enabled ? mode->min_vrr : 0,
+				      cookie);
+	else
+		dcp_set_digital_out_mode(dcp, false, &dcp->mode,
+					 complete_set_digital_out_mode, cookie);
 
 	/*
 	 * The DCP firmware has an internal timeout of ~8 seconds for
@@ -1286,24 +1331,24 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 	ret = wait_for_completion_timeout(&cookie->done,
 					  msecs_to_jiffies(8500));
 
-	kref_put(&cookie->refcount, release_wait_cookie);
-	dcp->during_modeset = false;
 	dev_info(dcp->dev, "set_digital_out_mode finished:%d\n", ret);
 
 	if (ret == 0) {
 		dev_info(dcp->dev, "set_digital_out_mode timed out\n");
+		kref_put(&cookie->refcount, release_wait_cookie);
 		return -EIO;
 	} else if (ret < 0) {
 		dev_info(dcp->dev,
 			 "waiting on set_digital_out_mode failed:%d\n", ret);
+		kref_put(&cookie->refcount, release_wait_cookie);
 		return -EIO;
-
-	} else if (ret > 0) {
+	} else {
 		dev_dbg(dcp->dev,
 			"set_digital_out_mode finished with %d to spare\n",
 			jiffies_to_msecs(ret));
 	}
-	dcp->valid_mode = true;
+	kref_put(&cookie->refcount, release_wait_cookie);
+	dcp->vrr_enabled = mode->vrr && crtc_state->vrr_enabled;
 
 	return 0;
 }
@@ -1410,14 +1455,26 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
 		req->clear = 1;
 	}
 
-	if (has_surface && dcp->use_timestamps) {
+	if (has_surface && (dcp->use_timestamps || dcp->vrr_enabled)) {
+		u64 submit_timestamp = dcp->swap_submit_timestamp;
+		u64 timestamp = arch_timer_read_counter();
+
 		/*
-		 * Fake timstamps to get 120hz refresh rate. It looks
-		 * like the actual value does not matter, as long  as it is non zero.
+		 * IOMobileFramebuffer uses Mach continuous-time values here. On
+		 * Apple Silicon that is the ARM architectural counter. Empirical
+		 * testing shows that using the current submission time together
+		 * with the previous accepted swap makes DCP follow swap pacing.
 		 */
-		req->swap.ts1 = 120;
-		req->swap.ts2 = 120;
-		req->swap.ts3 = 120;
+		if (!submit_timestamp)
+			submit_timestamp = timestamp;
+
+		/* Firmware 12.x/13.x requires timestamp types 1, 2, and 7. */
+		req->swap.timestamp[0] = timestamp;
+		req->swap.timestamp[1] = submit_timestamp;
+		req->swap.timestamp[6] = timestamp;
+
+		trace_iomfb_vrr_timestamps(dcp, dcp->vrr_enabled, timestamp,
+					   submit_timestamp);
 	}
 
 	/* These fields should be set together */

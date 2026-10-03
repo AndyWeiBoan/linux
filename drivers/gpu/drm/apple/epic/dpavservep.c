@@ -18,36 +18,57 @@ static void dcpavserv_init(struct apple_epic_service *service, const char *name,
 			  const char *class, s64 unit)
 {
 	struct apple_dcp *dcp = service->ep->dcp;
+	unsigned long flags;
+
 	trace_dcpavserv_init(dcp, unit);
 
 	if (unit == 0 && name && !strcmp(name, "dcpav-service-epic")) {
+		spin_lock_irqsave(&dcp->dcpavserv.lock, flags);
 		if (dcp->dcpavserv.enabled) {
+			spin_unlock_irqrestore(&dcp->dcpavserv.lock, flags);
 			dev_err(dcp->dev,
 				"DCPAVSERV: unit %lld already exists\n", unit);
 			return;
 		}
-		dcp->dcpavserv.service = service;
+		dcp->dcpavserv.service = afk_service_get(service);
 		dcp->dcpavserv.enabled = true;
 		service->cookie = &dcp->dcpavserv;
 		complete(&dcp->dcpavserv.enable_completion);
+		spin_unlock_irqrestore(&dcp->dcpavserv.lock, flags);
 	}
 }
 
 static void dcpavserv_teardown(struct apple_epic_service *service)
 {
 	struct apple_dcp *dcp = service->ep->dcp;
-	service->enabled = false;
+	unsigned long flags;
+	bool owned = false;
 
-	/*
-	 * Only clear the driver's handle if this is the service it is actually
-	 * holding. The AV endpoint sees several services come and go per
-	 * connect, and tearing any of them down used to wipe the live one.
-	 */
-	if (dcp->dcpavserv.enabled && dcp->dcpavserv.service == service) {
+	spin_lock_irqsave(&dcp->dcpavserv.lock, flags);
+	if (dcp->dcpavserv.service == service) {
 		dcp->dcpavserv.enabled = false;
 		dcp->dcpavserv.service = NULL;
-		service->cookie = NULL;
 		reinit_completion(&dcp->dcpavserv.enable_completion);
+		owned = true;
+	}
+	spin_unlock_irqrestore(&dcp->dcpavserv.lock, flags);
+	if (owned)
+		afk_service_put(service);
+}
+
+void dpavservep_detach(struct apple_dcp *dcp)
+{
+	struct apple_epic_service *service;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dcp->dcpavserv.lock, flags);
+	service = dcp->dcpavserv.service;
+	dcp->dcpavserv.service = NULL;
+	dcp->dcpavserv.enabled = false;
+	spin_unlock_irqrestore(&dcp->dcpavserv.lock, flags);
+	if (service) {
+		afk_service_disable(service);
+		afk_service_put(service);
 	}
 }
 
@@ -58,7 +79,7 @@ static void dcpdpserv_init(struct apple_epic_service *service, const char *name,
 
 static void dcpdpserv_teardown(struct apple_epic_service *service)
 {
-	service->enabled = false;
+	afk_service_disable(service);
 }
 
 struct dcpavserv_status_report {
@@ -92,6 +113,7 @@ struct dpavserv_copy_edid_resp {
 	u8 _pad2[8];
 	u8 data[];
 } __packed;
+static_assert(sizeof(struct dpavserv_copy_edid_resp) == 48);
 
 static int parse_report(struct apple_epic_service *service, enum epic_subtype type,
 			 const void *data, size_t data_size)
@@ -160,22 +182,23 @@ static int dcpdpserv_report(struct apple_epic_service *service,
 	return parse_report(service, type, data, data_size);
 }
 
-const struct drm_edid *dcpavserv_copy_edid(struct apple_epic_service *service)
+static const struct drm_edid *dcpavserv_read_edid(struct apple_epic_service *service)
 {
 	struct dpavserv_copy_edid_cmd cmd;
 	struct dpavserv_copy_edid_resp *resp __free(kfree) = NULL;
+	size_t resp_size = sizeof(*resp) + EDID_BUF_SIZE;
 	int num_blocks;
 	u64 data_size;
 	int ret;
 
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.max_size = cpu_to_le64(EDID_BUF_SIZE);
-	resp = kzalloc(sizeof(*resp) + EDID_BUF_SIZE, GFP_KERNEL);
+	resp = kzalloc(resp_size, GFP_KERNEL);
 	if (!resp)
 		return ERR_PTR(-ENOMEM);
 
 	ret = afk_service_call(service, 1, 7, &cmd, sizeof(cmd), EDID_BUF_SIZE, resp,
-			       sizeof(resp) + EDID_BUF_SIZE, 0);
+			       resp_size, 0);
 	if (ret < 0)
 		return ERR_PTR(ret);
 
@@ -186,26 +209,61 @@ const struct drm_edid *dcpavserv_copy_edid(struct apple_epic_service *service)
 	// 	       16, 1, resp, 192, true);
 
 	data_size = le64_to_cpu(resp->used_size);
-	if (data_size < EDID_LEADING_DATA_SIZE + EDID_BLOCK_SIZE)
+	if (data_size < EDID_LEADING_DATA_SIZE + EDID_BLOCK_SIZE ||
+	    data_size > EDID_BUF_SIZE)
 		return ERR_PTR(-EIO);
 
+	/*
+	 * An HDMI 2.x sink using the HF-EEODB announces fewer extension blocks
+	 * in the base block than it sends, so the payload may be longer than
+	 * the base block says. Accept any whole number of blocks at least that
+	 * long and leave the block count to drm_edid, which knows about
+	 * HF-EEODB.
+	 */
 	num_blocks = resp->data[EDID_LEADING_DATA_SIZE + EDID_EXT_BLOCK_COUNT_OFFSET];
-	if ((1 + num_blocks) * EDID_BLOCK_SIZE != data_size - EDID_LEADING_DATA_SIZE)
+	if ((1 + num_blocks) * EDID_BLOCK_SIZE > data_size - EDID_LEADING_DATA_SIZE ||
+	    (data_size - EDID_LEADING_DATA_SIZE) % EDID_BLOCK_SIZE)
 		return ERR_PTR(-EIO);
 
 	return drm_edid_alloc(resp->data + EDID_LEADING_DATA_SIZE,
 			      data_size - EDID_LEADING_DATA_SIZE);
 }
 
+const struct drm_edid *dcpavserv_copy_edid(struct apple_dcp *dcp)
+{
+	struct apple_epic_service *service;
+	const struct drm_edid *edid;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dcp->dcpavserv.lock, flags);
+	service = afk_service_get(dcp->dcpavserv.service);
+	spin_unlock_irqrestore(&dcp->dcpavserv.lock, flags);
+	if (!service)
+		return ERR_PTR(-ENODEV);
+
+	edid = dcpavserv_read_edid(service);
+	spin_lock_irqsave(&dcp->dcpavserv.lock, flags);
+	if (dcp->dcpavserv.service != service) {
+		if (!IS_ERR(edid))
+			drm_edid_free(edid);
+		edid = ERR_PTR(-ENODEV);
+	}
+	spin_unlock_irqrestore(&dcp->dcpavserv.lock, flags);
+	afk_service_put(service);
+	return edid;
+}
+
 static const struct apple_epic_service_ops dpavservep_ops[] = {
 	{
 		.name = "dcpav-service-epic",
+		.reusable = true,
 		.init = dcpavserv_init,
 		.teardown = dcpavserv_teardown,
 		.report = dcpavserv_report,
 	},
 	{
 		.name = "dcpdp-service-epic",
+		.reusable = true,
 		.init = dcpdpserv_init,
 		.teardown = dcpdpserv_teardown,
 		.report = dcpdpserv_report,
@@ -215,19 +273,25 @@ static const struct apple_epic_service_ops dpavservep_ops[] = {
 
 int dpavservep_init(struct apple_dcp *dcp)
 {
+	struct apple_dcp_afkep *ep;
 	int ret;
 
 	init_completion(&dcp->dcpavserv.enable_completion);
 
-	dcp->dcpavservep = afk_init(dcp, DPAVSERV_ENDPOINT, dpavservep_ops);
-	if (IS_ERR(dcp->dcpavservep))
-		return PTR_ERR(dcp->dcpavservep);
+	ep = afk_init(dcp, DPAVSERV_ENDPOINT, dpavservep_ops);
+	if (IS_ERR(ep))
+		return PTR_ERR(ep);
+	dcp->dcpavservep = ep;
 
 	dcp->dcpavservep->match_epic_name = true;
 
 	ret = afk_start(dcp->dcpavservep);
-	if (ret)
+	if (ret) {
+		afk_shutdown(ep);
+		dpavservep_detach(dcp);
+		dcp->dcpavservep = NULL;
 		return ret;
+	}
 
 	ret = wait_for_completion_timeout(&dcp->dcpavserv.enable_completion,
 					  msecs_to_jiffies(1000));

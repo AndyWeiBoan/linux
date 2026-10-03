@@ -466,6 +466,7 @@
 	};
 	*/
 
+#ifdef APPLE_T600X_NON_ULTRA
 	DIE_NODE(usb4_0_mbox): mailbox@701100000 {
 		compatible = "apple,t6000-m3-mailbox",
 			"apple,m3-mailbox-v2";
@@ -482,18 +483,6 @@
 
 	DIE_NODE(usb4_0_acio): cio@701ac0000 {
 		compatible = "apple,t6000-usb4-acio", "apple,t8103-usb4-acio";
-		/* Which Type-C port this block serves, matching atc0-* in Apple's
-		 * own device tree. Whatever arrives over a tunnel here has to be
-		 * routed through that port's display crossbar. */
-		apple,atc-index = <0>;
-		/*
-		 * The PCIe-C root complex this port's tunnels land on. Its
-		 * nodes are populated when this controller starts, not at
-		 * boot, so without this phandle they never appear at all.
-		 */
-#if DIE_NO == 0
-		apple,pcie-tunnel = <&usb4_0_pcie_tunnel>;
-#endif
 		reg = <0x7 0x01ac0000 0x0 0xc000>,
 			<0x7 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -503,7 +492,8 @@
 
 		power-domains = <&DIE_NODE(ps_atc0_cio)>,
 				<&DIE_NODE(ps_atc0_cio_pcie)>,
-				<&DIE_NODE(ps_atc0_cio_usb)>;
+				<&DIE_NODE(ps_atc0_cio_usb)>,
+				<&DIE_NODE(ps_atc0_pcie)>;
 
 		thunderbolt-switch;
 
@@ -569,6 +559,7 @@
 			apple,thunderbolt-drom = [00];
 		};
 	};
+#endif
 
 	DIE_NODE(dwc3_0): usb@702280000 {
 		compatible = "apple,t6000-dwc3", "apple,t8103-dwc3";
@@ -625,23 +616,13 @@
 
 	DIE_NODE(atcphy0_xbar): mux@70304c000 {
 		compatible = "apple,t6000-display-crossbar";
-		/*
-		 * The two Thunderbolt DP IN adapters' SoC-side blocks, which
-		 * the driver arms when bringing a tunnelled display up. The
-		 * offsets are the same on every ATC instance; the addresses
-		 * are the ones Apple's own device tree carries for
-		 * atc0-dpin0 / atc0-dpin1 on this SoC.
-		 */
-		reg = <0x7 0x0304c000 0x0 0x4000>,
-		      <0x7 0x01e50000 0x0 0x4000>,
-		      <0x7 0x01e58000 0x0 0x4000>;
-		reg-names = "xbar", "dpin0", "dpin1";
-		apple,atc-phy = <&DIE_NODE(atcphy0)>;
+		reg = <0x7 0x0304c000 0x0 0x4000>;
 		#mux-control-cells = <1>;
 		power-domains = <&DIE_NODE(ps_atc0_usb)>;
 		status = "disabled";
 	};
 
+#ifdef APPLE_T600X_NON_ULTRA
 	DIE_NODE(usb4_1_mbox): mailbox@b01100000 {
 		compatible = "apple,t6000-m3-mailbox",
 			"apple,m3-mailbox-v2";
@@ -658,18 +639,6 @@
 
 	DIE_NODE(usb4_1_acio): cio@b01ac0000 {
 		compatible = "apple,t6000-usb4-acio", "apple,t8103-usb4-acio";
-		/* Which Type-C port this block serves, matching atc1-* in Apple's
-		 * own device tree. Whatever arrives over a tunnel here has to be
-		 * routed through that port's display crossbar. */
-		apple,atc-index = <1>;
-		/*
-		 * The PCIe-C root complex this port's tunnels land on. Its
-		 * nodes are populated when this controller starts, not at
-		 * boot, so without this phandle they never appear at all.
-		 */
-#if DIE_NO == 0
-		apple,pcie-tunnel = <&usb4_1_pcie_tunnel>;
-#endif
 		reg = <0xb 0x01ac0000 0x0 0xc000>,
 			<0xb 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -679,7 +648,8 @@
 
 		power-domains = <&DIE_NODE(ps_atc1_cio)>,
 				<&DIE_NODE(ps_atc1_cio_pcie)>,
-				<&DIE_NODE(ps_atc1_cio_usb)>;
+				<&DIE_NODE(ps_atc1_cio_usb)>,
+				<&DIE_NODE(ps_atc1_pcie)>;
 
 		thunderbolt-switch;
 
@@ -745,6 +715,7 @@
 			apple,thunderbolt-drom = [00];
 		};
 	};
+#endif
 
 	DIE_NODE(dwc3_1): usb@b02280000 {
 		compatible = "apple,t6000-dwc3", "apple,t8103-dwc3";
@@ -801,30 +772,13 @@
 
 	DIE_NODE(atcphy1_xbar): mux@b0304c000 {
 		compatible = "apple,t6000-display-crossbar";
-		/*
-		 * The two Thunderbolt DP IN adapters have a small SoC-side
-		 * block each, which macOS programs as part of bringing up a
-		 * tunnelled display. Linux had no node for them at all.
-		 *
-		 * The driver programs them now, in macOS' own order, so they
-		 * are back in reg. Captured under the m1n1 hypervisor on a
-		 * Mac mini while macOS brought a Studio Display up:
-		 *
-		 *   dpin0: 0x08 = 3, 0x04 = 1, 0x00 = 5, 0x0c = 0, poll 0x10
-		 *   then the crossbar clock enables
-		 *
-		 * after which dpin0's 0x00 reads back 4 by itself - that is
-		 * the pixel clock starting.
-		 */
-		reg = <0xb 0x0304c000 0x0 0x4000>,
-		      <0xb 0x01e50000 0x0 0x4000>,
-		      <0xb 0x01e58000 0x0 0x4000>;
-		reg-names = "xbar", "dpin0", "dpin1";
-		apple,atc-phy = <&DIE_NODE(atcphy1)>;
+		reg = <0xb 0x0304c000 0x0 0x4000>;
 		#mux-control-cells = <1>;
 		power-domains = <&DIE_NODE(ps_atc1_usb)>;
+		status = "disabled";
 	};
 
+#ifdef APPLE_T600X_NON_ULTRA
 	DIE_NODE(usb4_2_mbox): mailbox@f01100000 {
 		compatible = "apple,t6000-m3-mailbox",
 			"apple,m3-mailbox-v2";
@@ -841,18 +795,6 @@
 
 	DIE_NODE(usb4_2_acio): cio@f01ac0000 {
 		compatible = "apple,t6000-usb4-acio", "apple,t8103-usb4-acio";
-		/* Which Type-C port this block serves, matching atc2-* in Apple's
-		 * own device tree. Whatever arrives over a tunnel here has to be
-		 * routed through that port's display crossbar. */
-		apple,atc-index = <2>;
-		/*
-		 * The PCIe-C root complex this port's tunnels land on. Its
-		 * nodes are populated when this controller starts, not at
-		 * boot, so without this phandle they never appear at all.
-		 */
-#if DIE_NO == 0
-		apple,pcie-tunnel = <&usb4_2_pcie_tunnel>;
-#endif
 		reg = <0xf 0x01ac0000 0x0 0xc000>,
 			<0xf 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -862,7 +804,8 @@
 
 		power-domains = <&DIE_NODE(ps_atc2_cio)>,
 				<&DIE_NODE(ps_atc2_cio_pcie)>,
-				<&DIE_NODE(ps_atc2_cio_usb)>;
+				<&DIE_NODE(ps_atc2_cio_usb)>,
+				<&DIE_NODE(ps_atc2_pcie)>;
 
 		thunderbolt-switch;
 
@@ -928,6 +871,7 @@
 			apple,thunderbolt-drom = [00];
 		};
 	};
+#endif
 
 	DIE_NODE(dwc3_2): usb@f02280000 {
 		compatible = "apple,t6000-dwc3", "apple,t8103-dwc3";
@@ -984,22 +928,13 @@
 
 	DIE_NODE(atcphy2_xbar): mux@f0304c000 {
 		compatible = "apple,t6000-display-crossbar";
-		/*
-		 * The two Thunderbolt DP IN adapters' SoC-side blocks, which
-		 * the driver arms when bringing a tunnelled display up. The
-		 * offsets are the same on every ATC instance; the addresses
-		 * are the ones Apple's own device tree carries for
-		 * atc2-dpin0 / atc2-dpin1 on this SoC.
-		 */
-		reg = <0xf 0x0304c000 0x0 0x4000>,
-		      <0xf 0x01e50000 0x0 0x4000>,
-		      <0xf 0x01e58000 0x0 0x4000>;
-		reg-names = "xbar", "dpin0", "dpin1";
-		apple,atc-phy = <&DIE_NODE(atcphy2)>;
+		reg = <0xf 0x0304c000 0x0 0x4000>;
 		#mux-control-cells = <1>;
 		power-domains = <&DIE_NODE(ps_atc2_usb)>;
+		status = "disabled";
 	};
 
+#ifdef APPLE_T600X_NON_ULTRA
 	DIE_NODE(usb4_3_mbox): mailbox@1301100000 {
 		compatible = "apple,t6000-m3-mailbox",
 			"apple,m3-mailbox-v2";
@@ -1016,18 +951,6 @@
 
 	DIE_NODE(usb4_3_acio): cio@1301ac0000 {
 		compatible = "apple,t6000-usb4-acio", "apple,t8103-usb4-acio";
-		/* Which Type-C port this block serves, matching atc3-* in Apple's
-		 * own device tree. Whatever arrives over a tunnel here has to be
-		 * routed through that port's display crossbar. */
-		apple,atc-index = <3>;
-		/*
-		 * The PCIe-C root complex this port's tunnels land on. Its
-		 * nodes are populated when this controller starts, not at
-		 * boot, so without this phandle they never appear at all.
-		 */
-#if DIE_NO == 0
-		apple,pcie-tunnel = <&usb4_3_pcie_tunnel>;
-#endif
 		reg = <0x13 0x01ac0000 0x0 0xc000>,
 			<0x13 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -1103,6 +1026,7 @@
 			apple,thunderbolt-drom = [00];
 		};
 	};
+#endif
 
 	DIE_NODE(dwc3_3): usb@1302280000 {
 		compatible = "apple,t6000-dwc3", "apple,t8103-dwc3";
@@ -1160,7 +1084,7 @@
 	DIE_NODE(atcphy3_xbar): mux@130304c000 {
 		compatible = "apple,t6000-display-crossbar";
 		reg = <0x13 0x0304c000 0x0 0x4000>;
-		apple,atc-phy = <&DIE_NODE(atcphy3)>;
 		#mux-control-cells = <1>;
 		power-domains = <&DIE_NODE(ps_atc3_usb)>;
+		status = "disabled";
 	};

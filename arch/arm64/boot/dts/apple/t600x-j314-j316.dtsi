@@ -24,32 +24,39 @@
 		bluetooth0 = &bluetooth0;
 		dcp = &dcp;
 		dcpext0 = &dcpext0;
-		/*
-		 * m1n1 looks the DCPs up by alias (dcpext_aliases[] in its
-		 * kboot.c) to fill in apple,firmware-version and
-		 * apple,firmware-compat. Without the alias dcpext1 probes with
-		 * "Could not read 'apple,firmware-compat': -22". Needed
-		 * unconditionally here, not only under ENABLE_DCPEXT_TYPEC.
-		 */
+#ifdef APPLE_T600X_NON_ULTRA
 		dcpext1 = &dcpext1;
+#endif
 		disp0 = &display;
 		disp0_piodma = &disp0_piodma;
 		serial0 = &serial0;
 		sio = &sio;
 		usb4-0-acio = &usb4_0_acio;
 		usb4-0-nhi = &usb4_0_nhi;
-		usb4-1-acio = &usb4_1_acio;
-		usb4-1-nhi = &usb4_1_nhi;
-		usb4-2-acio = &usb4_2_acio;
-		usb4-2-nhi = &usb4_2_nhi;
-		wifi0 = &wifi0;
-
+		usb4-0-pcie-adapter = &usb4_0_acio;
+		usb4-0-pcie = &apciec0;
 		usb4_0_rc = &usb4_0_acio;
 		usb4_0_nhi = &usb4_0_nhi;
+		usb4_0_pcie_adapter = &usb4_0_acio;
+		usb4_0_pcie = &apciec0;
+		usb4-1-acio = &usb4_1_acio;
+		usb4-1-nhi = &usb4_1_nhi;
+		usb4-1-pcie-adapter = &usb4_1_acio;
+		usb4-1-pcie = &apciec1;
 		usb4_1_rc = &usb4_1_acio;
 		usb4_1_nhi = &usb4_1_nhi;
+		usb4_1_pcie_adapter = &usb4_1_acio;
+		usb4_1_pcie = &apciec1;
+		usb4-2-acio = &usb4_2_acio;
+		usb4-2-nhi = &usb4_2_nhi;
+		usb4-2-pcie-adapter = &usb4_2_acio;
+		usb4-2-pcie = &apciec2;
 		usb4_2_rc = &usb4_2_acio;
 		usb4_2_nhi = &usb4_2_nhi;
+		usb4_2_pcie_adapter = &usb4_2_acio;
+		usb4_2_pcie = &apciec2;
+		usb4-3-pcie = &apciec3;
+		wifi0 = &wifi0;
 	};
 
 	chosen {
@@ -99,11 +106,7 @@
 };
 
 &display {
-	/*
-	 * 7.1's DART binding takes one cell here, unlike the 7.2 tree this
-	 * came from - keep that form and just add the second dispext.
-	 */
-	iommus = <&disp0_dart 0>, <&dispext0_dart 0>, <&dispext1_dart 0>;
+	iommus = <&disp0_dart 0>, <&dispext0_dart 0>;
 };
 
 &dispext0_dart {
@@ -120,148 +123,144 @@
 
 &dcpext0 {
 	/* enabled by the loader */
+	apple,connector-type = "HDMI-A";
 
-	/*
-	 * TEST: drive the Studio Display over the Thunderbolt DP tunnel from
-	 * dcpext0, mirroring what macOS does. macOS programs crossbar source 0
-	 * (= dispext0) into DP IN0; dcpext1/source 1 behaves identically up to
-	 * the point where the DPTX firmware gives up, so try the exact macOS
-	 * pairing. HDMI is given up for the duration of this test.
-	 *
-	 * Deliberately no "phys": that would make probe force the Type-C PHY to
-	 * DP-only and tear down the Thunderbolt link we tunnel over.
-	 */
-	apple,connector-type = "DP";
+	/*  HDMI HPD gpio, used as interrupt*/
+	hdmi-hpd-gpios = <&pinctrl_nub 15 GPIO_ACTIVE_HIGH>;
 
-	/*
-	 * The tunnel's host DP IN adapter "0:5" is the crossbar's dpin0.
-	 * Measured, not assumed: routing to dpin1 instead leaves the link
-	 * untrained (no EDID, no modes at all), and the ACIO firmware arms
-	 * dpin0 (its MODE reads 5) while dpin1 stays all zeroes.
-	 */
-	/*
-	 * One crossbar per Type-C port, named after the ATC instance it
-	 * belongs to. A tunnelled display can show up on any of them, so the
-	 * driver picks the one the Thunderbolt domain that carries it sits
-	 * behind; mux control 1 is MUX_DPIN0 on each.
-	 */
-	mux-controls = <&atcphy0_xbar 1>,
-		       <&atcphy1_xbar 1>,
-		       <&atcphy2_xbar 1>;
-	mux-control-names = "dp-xbar-atc0", "dp-xbar-atc1", "dp-xbar-atc2";
-	mux-index = <0>;			/* source = dispext0, like macOS */
-	apple,dptx-phy = <1>;
-};
+	hdmi-pwren-gpios = <&smc_gpio 23 GPIO_ACTIVE_HIGH>;
+	dp2hdmi-pwren-gpios = <&smc_gpio 6 GPIO_ACTIVE_HIGH>;
 
-/*
- * EXPERIMENT (andywei, 2026-09-28): feed the Thunderbolt host router's
- * DP IN adapter so a DP tunnel can actually be activated.
- *
- * Without a display controller driving DP IN, tb_dp_wait_dprx() never sees
- * DP_COMMON_CAP_DPRX_DONE and the tunnel is torn down:
- *
- *   thunderbolt-apple-nhi b01f00000.nhi: 0:5 <-> 1:10 (DP): not active, tearing down
- *
- * Route dcpext1 through atcphy1's crossbar to MUX_DPIN0 (mux control 1).
- * This mirrors what macOS does, as captured under the m1n1 hypervisor:
- *
- *   CROSSBAR_DISPEXT_EN (0x50) = 0x1
- *   CROSSBAR_MUX_CTRL   (0x60) = 0x0    -> DPIN0_SELECT = source 0
- *   CROSSBAR_ATC_EN     (0x70) = 0x1    -> ATC_DPIN0
- *
- * atcphy1 is the port the Studio Display was attached to (b01ac0000.cio).
- * Static for now; a real implementation has to switch the crossbar
- * dynamically depending on which port the tunnelled display shows up on.
- */
-&dispext1_dart {
-	status = "okay";
-};
-
-&dcpext1_dart {
-	status = "okay";
-};
-
-&dcpext1_mbox {
-	status = "okay";
-};
-
-&dcpext1 {
-	/*
-	 * Tried feeding the display's second DP OUT (1:11) from here via the
-	 * crossbar's DPIN1: the display never offers that adapter
-	 * ("0:6: no suitable DP OUT adapter available"), it is a single-stream
-	 * sink over Thunderbolt, and having a second DCP on the crossbar
-	 * stopped dcpext0 from connecting at all. Left plain.
-	 */
-	status = "okay";
-};
-
-&atcphy1_xbar {
-	status = "okay";
-};
-
-/*
- * EXPERIMENT (andywei, 2026-09-28): feed the Thunderbolt host router's
- * DP IN adapter so a DP tunnel can actually be activated.
- *
- * Without a display controller driving DP IN, tb_dp_wait_dprx() never sees
- * DP_COMMON_CAP_DPRX_DONE and the tunnel is torn down:
- *
- *   thunderbolt-apple-nhi b01f00000.nhi: 0:5 <-> 1:10 (DP): not active, tearing down
- *
- * Route dcpext1 through atcphy1's crossbar to MUX_DPIN0 (mux control 1).
- * This mirrors what macOS does, as captured under the m1n1 hypervisor:
- *
- *   CROSSBAR_DISPEXT_EN (0x50) = 0x1
- *   CROSSBAR_MUX_CTRL   (0x60) = 0x0    -> DPIN0_SELECT = source 0
- *   CROSSBAR_ATC_EN     (0x70) = 0x1    -> ATC_DPIN0
- *
- * atcphy1 is the port the Studio Display was attached to (b01ac0000.cio).
- * Static for now; a real implementation has to switch the crossbar
- * dynamically depending on which port the tunnelled display shows up on.
- */
-&dispext1_dart {
-	status = "okay";
-};
-
-&dcpext1_dart {
-	status = "okay";
-};
-
-&dcpext1_mbox {
-	status = "okay";
-};
-
-&dcpext1 {
-	status = "okay";
-
-	apple,connector-type = "DP";
-
-	/*
-	 * mux control 1 = MUX_DPIN0 (drivers/mux/apple-display-crossbar.c).
-	 * mux-index is the dispext source; dcpext1 uses dispext1, so 1.
-	 * If this turns out to be wrong, 0 is the other candidate - macOS used
-	 * source 0 on the (2-source) t8103 crossbar.
-	 */
-	mux-controls = <&atcphy1_xbar 1>;
+	phys = <&atcphy3 PHY_TYPE_DP>;
+	phy-names = "dp-phy";
+	mux-controls = <&atcphy3_xbar 0>;
 	mux-control-names = "dp-xbar";
-	mux-index = <1>;
+	mux-index = <0>;
+	apple,dptx-phy = <3>;
 
-	/*
-	 * Which DP transmitter the DCP firmware should drive. The crossbar
-	 * routes that DPTX output to DP IN0; without this it defaults to 0
-	 * and the DCP would drive atcphy0's transmitter instead.
-	 *
-	 * Deliberately no "phys" property: that would make dcp_platform_probe()
-	 * take the dcp->phy path and force the Type-C PHY to DP-only, which
-	 * tears down the Thunderbolt link we are trying to tunnel over.
-	 */
-	apple,dptx-phy = <1>;
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@1 {
+			reg = <1>;
+
+			decpext0_dpout: endpoint {
+				remote-endpoint = <&atcphy3_dp>;
+			};
+		};
+	};
+
+};
+
+#ifdef APPLE_T600X_NON_ULTRA
+&display {
+	iommus = <&disp0_dart 0>, <&dispext0_dart 0>, <&dispext1_dart 0>;
+};
+
+&dispext1_dart {
+	status = "okay";
+};
+
+&dcpext1_dart {
+	status = "okay";
+};
+
+&dcpext1_mbox {
+	status = "okay";
+};
+
+&dcpext1 {
+	status = "okay";
+	apple,connector-type = "USB-C";
+	phys = <&atcphy0 PHY_TYPE_DP>, <&atcphy1 PHY_TYPE_DP>,
+	       <&atcphy2 PHY_TYPE_DP>;
+	phy-names = "typec0", "typec1", "typec2";
+	mux-controls = <&atcphy0_xbar 0>, <&atcphy1_xbar 0>,
+		       <&atcphy2_xbar 0>;
+	mux-control-names = "typec0", "typec1", "typec2";
+	apple,typec-mux-indices = <2 2 2>;
+	apple,typec-dptx-phys = <0 1 2>;
+
+	typec-routes {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		route@0 {
+			reg = <0>;
+			mode-switch;
+
+			port {
+				dcpext1_typec0: endpoint {
+					remote-endpoint = <&typec0_dcp>;
+				};
+			};
+		};
+
+		route@1 {
+			reg = <1>;
+			mode-switch;
+
+			port {
+				dcpext1_typec1: endpoint {
+					remote-endpoint = <&typec1_dcp>;
+				};
+			};
+		};
+
+		route@2 {
+			reg = <2>;
+			mode-switch;
+
+			port {
+				dcpext1_typec2: endpoint {
+					remote-endpoint = <&typec2_dcp>;
+				};
+			};
+		};
+	};
+};
+
+&dpaudio2 {
+	status = "okay";
+};
+
+&atcphy0_xbar {
+	status = "okay";
 };
 
 &atcphy1_xbar {
 	status = "okay";
 };
+
+&atcphy2_xbar {
+	status = "okay";
+};
+
+&ps_atc0_common {
+	apple,always-on;
+};
+
+&ps_atc1_common {
+	apple,always-on;
+};
+
+&ps_atc2_common {
+	apple,always-on;
+};
+
+&usb4_0_acio {
+	apple,pcie-tunnel = <&usb4_0_pcie_tunnel>;
+};
+
+&usb4_1_acio {
+	apple,pcie-tunnel = <&usb4_1_pcie_tunnel>;
+};
+
+&usb4_2_acio {
+	apple,pcie-tunnel = <&usb4_2_pcie_tunnel>;
+};
+#endif
 
 /* remove once m1n1 enables sio nodes after setup */
 &sio {
@@ -295,13 +294,6 @@
 			power-role = "dual";
 			data-role = "dual";
 
-#ifdef ENABLE_DCPEXT_TYPEC
-			/* see the Left Front connector */
-			displayport = <&dcpext1>;
-			apple,atc-index = <0>;
-#endif
-
-
 			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
@@ -334,16 +326,9 @@
 			power-role = "dual";
 			data-role = "dual";
 
-#ifdef ENABLE_DCPEXT_TYPEC
-			/*
-			 * The display controller that drives this port's PHY,
-			 * for a display on plain DisplayPort altmode. One
-			 * arriving over a Thunderbolt tunnel does not use this
-			 * path at all - see apple,dp-tunnel-sink on the CIO
-			 * blocks, which names the controller for that instead.
-			 */
+#if defined(ENABLE_DCPEXT_TYPEC) && !defined(APPLE_T600X_NON_ULTRA)
+			/* hacks */
 			displayport = <&dcpext1>;
-			apple,atc-index = <1>;
 #endif
 
 			ports {
@@ -378,13 +363,6 @@
 			power-role = "dual";
 			data-role = "dual";
 
-#ifdef ENABLE_DCPEXT_TYPEC
-			/* see the Left Front connector */
-			displayport = <&dcpext1>;
-			apple,atc-index = <2>;
-#endif
-
-
 			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
@@ -414,7 +392,7 @@
 	};
 };
 
-#ifdef ENABLE_DCPEXT_TYPEC
+#if defined(ENABLE_DCPEXT_TYPEC) && !defined(APPLE_T600X_NON_ULTRA)
 
 &display {
 	iommus = <&disp0_dart 0>, <&dispext0_dart 0>, <&dispext1_dart 0>;
@@ -438,21 +416,10 @@
 
 	/* hacks */
 	apple,dptx-phy = <1>;
-	/*
-	 * One per Type-C port. A display on plain DisplayPort altmode can
-	 * arrive on any of them and only one is ever driven at a time, so
-	 * hold all three and pick at connect, the way the tunnel side picks
-	 * its crossbar.
-	 */
-	phys = <&atcphy0 PHY_TYPE_DP>,
-	       <&atcphy1 PHY_TYPE_DP>,
-	       <&atcphy2 PHY_TYPE_DP>;
-	phy-names = "dp-phy-atc0", "dp-phy-atc1", "dp-phy-atc2";
-	/* one per port, control 0 is MUX_DPPHY - the PHY's own output */
-	mux-controls = <&atcphy0_xbar 0>,
-		       <&atcphy1_xbar 0>,
-		       <&atcphy2_xbar 0>;
-	mux-control-names = "dp-xbar-atc0", "dp-xbar-atc1", "dp-xbar-atc2";
+	phys = <&atcphy1 PHY_TYPE_DP>;
+	phy-names = "dp-phy";
+	mux-controls = <&atcphy1_xbar 0>;
+	mux-control-names = "dp-xbar";
 	mux-index = <2>;
 };
 
@@ -625,6 +592,53 @@
 	status = "okay";
 };
 
+#ifdef APPLE_T600X_NON_ULTRA
+&typec0 {
+	ports {
+		port@3 {
+			reg = <3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			typec0_dcp: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&dcpext1_typec0>;
+			};
+		};
+	};
+};
+
+&typec1 {
+	ports {
+		port@3 {
+			reg = <3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			typec1_dcp: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&dcpext1_typec1>;
+			};
+		};
+	};
+};
+
+&typec2 {
+	ports {
+		port@3 {
+			reg = <3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			typec2_dcp: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&dcpext1_typec2>;
+			};
+		};
+	};
+};
+#endif
+
 /* USB controllers */
 &dwc3_0 {
 	ports {
@@ -780,7 +794,19 @@
 	};
 };
 
-/* TEST: atcphy3 DP endpoint removed along with the HDMI config above. */
+&atcphy3 {
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@2 {
+			reg = <2>;
+			atcphy3_dp: endpoint {
+				remote-endpoint = <&decpext0_dpout>;
+			};
+		};
+	};
+};
 
 &aop_mbox {
        status = "okay";
@@ -951,33 +977,3 @@
 #include "hwmon-common.dtsi"
 #include "hwmon-fan-dual.dtsi"
 #include "hwmon-laptop.dtsi"
-
-/*
- * The other two Type-C ports' crossbars. A tunnelled display can arrive on
- * any port, and dcpext0 holds a mux control for each of them.
- */
-&atcphy0_xbar {
-	status = "okay";
-};
-
-&atcphy2_xbar {
-	status = "okay";
-};
-
-/*
- * Where a display arriving over a Thunderbolt tunnel on each port is driven
- * from. Deliberately not the connector's "displayport": that one names the
- * controller which drives the port's Type-C PHY for a plain DisplayPort
- * altmode display, and both kinds have to keep working, including hotplug.
- */
-&usb4_0_acio {
-	apple,dp-tunnel-sink = <&dcpext0>;
-};
-
-&usb4_1_acio {
-	apple,dp-tunnel-sink = <&dcpext0>;
-};
-
-&usb4_2_acio {
-	apple,dp-tunnel-sink = <&dcpext0>;
-};

@@ -11,6 +11,9 @@
 
 #define GPU_REPEAT(x) <x x>
 
+/* The ANE has only run on the M2 Max so far: leave it off on the M2 Pro */
+#define APPLE_ANE_UNTESTED
+
 #include "t6021.dtsi"
 
 / {
@@ -25,6 +28,10 @@
 /delete-node/ &pmp_report_prores;
 /delete-node/ &pmp_report_afnc4_ioa;
 /delete-node/ &pmp_report_afnc5_ioa;
+
+&ane {
+	compatible = "apple,t6020-ane";
+};
 
 &gpu {
 	compatible = "apple,agx-t6020", "apple,agx-g14x", "apple,agx-g14s";
