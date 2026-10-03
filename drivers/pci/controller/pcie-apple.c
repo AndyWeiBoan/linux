@@ -230,6 +230,19 @@ static bool apple_pcie_tunnel_dry_run;
 #define VARIANT_KEEP_CLOCKS	BIT(0)
 #define VARIANT_KNOWN_REGS_ONLY	BIT(1)
 #define VARIANT_NO_TUNABLES	BIT(2)
+/*
+ * bit 3: m1n1's own bring-up for this SoC instead of the transcript. Its
+ * pcie.c does the long register block only for T602X and T8122; for a t8103 or
+ * t6000 it releases reset, waits for the port, waits for the link to go idle,
+ * unlocks the DesignWare core and applies the rc tunable there - to the config
+ * space, which is where offsets 0x78, 0x718, 0x814 and 0x8bc belong (0x8bc is
+ * DWC_DBI_RO_WR). Writing that tunable into the rc MMIO window, which is what
+ * we were doing, is simply wrong.
+ */
+#define VARIANT_M1N1_PATH	BIT(3)
+
+#define DWC_DBI_RO_WR		0x8bc
+#define DWC_DBI_RO_WR_EN	BIT(0)
 static unsigned int apple_pcie_tunnel_variant;
 module_param_named(tunnel_variant, apple_pcie_tunnel_variant, uint, 0644);
 MODULE_PARM_DESC(tunnel_variant,
@@ -312,13 +325,14 @@ static const struct {
 	{ "apple,tunable-debug",  "debug"  },
 	{ "apple,tunable-fabric", "fabric" },
 	/*
-	 * Deliberately not "apple,tunable-rc". m1n1 hands it to us, but in a
-	 * full trace of macOS - boot and a hotplug - the rc window is not
-	 * touched once, while fabric and debug are written repeatedly. It is
-	 * presumably programmed earlier, by iBoot. Writing it from here takes
-	 * an asynchronous SError a moment later, so the window is not ours to
-	 * touch at this point.
+	 * Not the "rc" window: its offsets - 0x78, 0x718, 0x814, 0x8bc - are
+	 * DesignWare core registers in the config space, and 0x8bc is
+	 * DWC_DBI_RO_WR, the one that unlocks the rest. m1n1 applies the
+	 * equivalent tunable to config_base for exactly this reason. Writing
+	 * it into the rc MMIO window takes an SError, which is how we found
+	 * out.
 	 */
+	{ "apple,tunable-rc",     "config" },
 };
 
 /* A parsed tunable together with the window it is applied to. */
@@ -338,6 +352,7 @@ struct apple_pcie {
 	struct irq_fwspec	fwspec;
 	u32			nvecs;
 	struct apple_pcie_tunable tunables[ARRAY_SIZE(apple_pcie_tunables)];
+	void __iomem *cfg_base;
 };
 
 /*
@@ -1250,6 +1265,20 @@ static int apple_pcie_probe(struct platform_device *pdev)
 	if (IS_ERR(pcie->base))
 		return PTR_ERR(pcie->base);
 
+	if (hw->tunnelled) {
+		struct resource *cfg;
+
+		/*
+		 * The root port's own config space, which is where the
+		 * DesignWare core registers live. Mapped without claiming:
+		 * the ECAM owns this window.
+		 */
+		cfg = platform_get_resource_byname(pdev, IORESOURCE_MEM,
+						   "config");
+		if (cfg)
+			pcie->cfg_base = devm_ioremap(dev, cfg->start, SZ_4K);
+	}
+
 	/*
 	 * Load the tunables but do not write anything here. macOS programs
 	 * them as the first step of bringing a tunnel up, not at boot, and
@@ -1369,6 +1398,50 @@ static void apple_pcie_tunnel_port_init(struct apple_pcie *pcie,
 
 	apple_pcie_tunnel_dry_run =
 		apple_pcie_tunnel_dry & (start_link ? DRY_TUNNEL : DRY_PROBE);
+
+	if (apple_pcie_tunnel_variant & VARIANT_M1N1_PATH) {
+		u32 stat;
+
+		TUNABLE(0);		/* debug */
+		TUNABLE(1);		/* fabric */
+
+		tset(PORT_APPCLK_EN, PORT_APPCLK);
+		tset(PORT_PERST_OFF, pcie->hw->port_perst);
+
+		if (!apple_pcie_tunnel_dry_run) {
+			readl_relaxed_poll_timeout(port->base + PORT_STATUS,
+						   stat,
+						   stat & PORT_STATUS_READY,
+						   100, 250000);
+			readl_relaxed_poll_timeout(port->base + PORT_LINKSTS,
+						   stat,
+						   !(stat & PORT_LINKSTS_BUSY),
+						   100, 250000);
+		}
+
+		/*
+		 * The rc tunable goes to the config space, with the
+		 * DesignWare core unlocked first.
+		 */
+		if (apple_pcie_tunnel_dry_run) {
+			dev_info(pcie->dev, "DRY cfg %#x |= %#x\n",
+				 DWC_DBI_RO_WR, DWC_DBI_RO_WR_EN);
+			dev_info(pcie->dev, "DRY rc tunable -> config space\n");
+		} else if (pcie->tunables[2].values) {
+			void __iomem *cfg = pcie->cfg_base;
+
+			if (cfg) {
+				rmw_set(DWC_DBI_RO_WR_EN, cfg + DWC_DBI_RO_WR);
+				apple_tunable_apply(cfg, pcie->tunables[2].values);
+			}
+		}
+
+		if (start_link) {
+			reinit_completion(&pcie->event);
+			tw(PORT_LTSSMCTL, PORT_LTSSMCTL_START);
+		}
+		return;
+	}
 
 	/*
 	 * Transcribed write for write from the trace, including the plain
