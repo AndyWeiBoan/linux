@@ -444,6 +444,7 @@ struct apple_pcie_port {
 	int			sid_map_sz;
 	int			idx;
 	struct apple_pcie_tunable tunable;
+	resource_size_t base_size;
 };
 
 static void rmw_set(u32 set, void __iomem *addr)
@@ -929,6 +930,15 @@ static void apple_pcie_dump_port(struct apple_pcie *pcie,
 	for (int i = 0; i < ARRAY_SIZE(apple_pcie_dump_offsets); i++) {
 		u32 off = apple_pcie_dump_offsets[i];
 
+		/*
+		 * The internal controller's port window is 0x4000, so 0x4020
+		 * is past the end of it. Reading there is off the mapping
+		 * entirely, which is an oops rather than anything to do with
+		 * the hardware.
+		 */
+		if (off + 4 > port->base_size)
+			continue;
+
 		n += scnprintf(line + n, sizeof(line) - n, " %03x=%08x", off,
 			       readl_relaxed(port->base + off));
 		if (n > 90 || i == ARRAY_SIZE(apple_pcie_dump_offsets) - 1) {
@@ -975,6 +985,7 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 	port->base = devm_ioremap_resource(&platform->dev, res);
 	if (IS_ERR(port->base))
 		return PTR_ERR(port->base);
+	port->base_size = resource_size(res);
 
 	if (pcie->hw->tunnelled) {
 		snprintf(name, sizeof(name), "port%d", port->idx);
