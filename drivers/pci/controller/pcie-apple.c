@@ -211,6 +211,36 @@ MODULE_PARM_DESC(tunnel_dry_run,
 /* Set for the duration of one pass, so the macros know which bit applies. */
 static bool apple_pcie_tunnel_dry_run;
 
+/*
+ * Variants of the sequence, to find out which part of it this SoC will not
+ * take. The transcript is from a t8103, which has five register windows on an
+ * apciec; a t6000 has seven, so the port block is not laid out the same and
+ * parts of the sequence may simply not apply here.
+ *
+ *   bit 0  keep APPCLK and REFCLK enabled throughout, rather than dropping
+ *          them the way the transcript does. If the block gates its registers
+ *          on those clocks here, every access after the first would fault.
+ *   bit 1  skip every offset the driver did not already know about, leaving
+ *          only registers Linux has always written.
+ */
+#define VARIANT_KEEP_CLOCKS	BIT(0)
+#define VARIANT_KNOWN_REGS_ONLY	BIT(1)
+static unsigned int apple_pcie_tunnel_variant;
+module_param_named(tunnel_variant, apple_pcie_tunnel_variant, uint, 0644);
+MODULE_PARM_DESC(tunnel_variant,
+		 "bit 0: never drop the clocks; bit 1: only registers Linux already knew");
+
+/* Offsets seen only in the t8103 transcript. */
+#define tw_new(off, val) do {						\
+	if (!(apple_pcie_tunnel_variant & VARIANT_KNOWN_REGS_ONLY))	\
+		tw((off), (val));					\
+} while (0)
+
+#define tr_new(off) do {						\
+	if (!(apple_pcie_tunnel_variant & VARIANT_KNOWN_REGS_ONLY))	\
+		tr(off);						\
+} while (0)
+
 struct apple_pcie;
 struct apple_pcie_port;
 static void apple_pcie_tunnel_port_init(struct apple_pcie *pcie,
@@ -1341,54 +1371,60 @@ static void apple_pcie_tunnel_port_init(struct apple_pcie *pcie,
 	TUNABLE(0);			/* debug */
 	TUNABLE(1);			/* fabric */
 
-	tw(PORT_TUNNEL_PRE_RESET, 0x110);
+	tw_new(PORT_TUNNEL_PRE_RESET, 0x110);
 	tw(PORT_INTSTAT, 0xffffffff);
-	tw(PORT_TUNNEL_CLRSTS, 0xffffffff);
+	tw_new(PORT_TUNNEL_CLRSTS, 0xffffffff);
 	tw(PORT_LINKCMDSTS, 0xffffffff);
 	tw(PORT_LTSSMCTL, 0x0);
-	tw(PORT_TUNNEL_CFG084, 0x0);
+	tw_new(PORT_TUNNEL_CFG084, 0x0);
 	tw(PORT_INTMSK, 0xffffffff);
 	tw(PORT_MSICFG, 0x0);
 	tw(PORT_MSIBASE, 0x0);
 	tw(PORT_MSIADDR, 0x0);
-	tw(PORT_TUNNEL_CFG13C, 0x10);
-	tw(PORT_APPCLK, 0x100100);
-	tw(PORT_TUNNEL_CFG808, 0x100045);
-	tw(PORT_REFCLK, 0x100);
+	tw_new(PORT_TUNNEL_CFG13C, 0x10);
+	if (apple_pcie_tunnel_variant & VARIANT_KEEP_CLOCKS) {
+		tw(PORT_APPCLK, 0x100101);	/* CGDIS set, EN kept */
+		tw_new(PORT_TUNNEL_CFG808, 0x100045);
+		tw(PORT_REFCLK, 0x101);		/* CGDIS set, EN kept */
+	} else {
+		tw(PORT_APPCLK, 0x100100);
+		tw_new(PORT_TUNNEL_CFG808, 0x100045);
+		tw(PORT_REFCLK, 0x100);
+	}
 	tw(PORT_PERST, 0x0);
 
 	CLEAR_RID2SID();
 
-	tw(PORT_TUNNEL_CFG130, 0x208);
+	tw_new(PORT_TUNNEL_CFG130, 0x208);
 	tw(PORT_TUNNEL_CFG140, 0x10);
-	tw(PORT_TUNNEL_CFG144, 0x253770);
-	tw(PORT_TUNNEL_CFG21C, 0x0);
-	tw(PORT_TUNNEL_CFG81C, 0x0);
-	tw(PORT_TUNNEL_CFG824, 0x0);
+	tw_new(PORT_TUNNEL_CFG144, 0x253770);
+	tw_new(PORT_TUNNEL_CFG21C, 0x0);
+	tw_new(PORT_TUNNEL_CFG81C, 0x0);
+	tw_new(PORT_TUNNEL_CFG824, 0x0);
 
 	PORT_TUNABLE();			/* sets bit 0 of the 0x10 above */
 
 	tw(PORT_PERST, 0x1);
 	tw(PORT_APPCLK, 0x100101);
 	tw(PORT_APPCLK, 0x100001);
-	tw(PORT_TUNNEL_ARM, 0x3);
+	tw_new(PORT_TUNNEL_ARM, 0x3);
 
 	CLEAR_RID2SID();
 
 	tw(PORT_INTSTAT, 0x84aed00f);
-	tw(PORT_INTMSKCLR, 0x84aed00f);
+	tw_new(PORT_INTMSKCLR, 0x84aed00f);
 	tw(PORT_MSICFG, 0x51);
 	tw(PORT_MSIBASE, 0x0);
 	tw(PORT_MSIADDR, lower_32_bits(DOORBELL_ADDR));
 
 	for (int i = 0; i < 3; i++) {
 		tw(PORT_APPCLK, 0x100101);
-		tw(PORT_TUNNEL_POKE994, 0x1);
+		tw_new(PORT_TUNNEL_POKE994, 0x1);
 		tw(PORT_APPCLK, 0x100001);
 	}
 
-	tw(PORT_TUNNEL_CFG988, 0x0);
-	tr(PORT_TUNNEL_CFG98C);
+	tw_new(PORT_TUNNEL_CFG988, 0x0);
+	tr_new(PORT_TUNNEL_CFG98C);
 
 	if (start_link) {
 		reinit_completion(&pcie->event);
