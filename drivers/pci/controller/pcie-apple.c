@@ -173,6 +173,19 @@ MODULE_PARM_DESC(link_up_timeout, "PCIe link training timeout in milliseconds");
  * until it has been shown to work, so a bad guess costs one boot with the
  * parameter set rather than an unbootable kernel.
  */
+/*
+ * Which steps of the tunnel bring-up to actually perform, one bit each:
+ *   0 tunables   1 port down   2 port config   3 port tunable
+ *   4 release    5 MSI         6 link training 7 bus rescan
+ * Default 0: log what the registers say and change nothing, so that a plug
+ * is safe and the steps can be switched on one at a time at runtime rather
+ * than one reboot per guess.
+ */
+static unsigned int apple_pcie_tunnel_steps;
+module_param_named(tunnel_steps, apple_pcie_tunnel_steps, uint, 0644);
+MODULE_PARM_DESC(tunnel_steps,
+		 "Bitmask of tunnel bring-up steps to perform (0 = observe only)");
+
 static bool apple_pcie_enable_tunnel;
 module_param_named(enable_tunnel, apple_pcie_enable_tunnel, bool, 0444);
 MODULE_PARM_DESC(enable_tunnel,
@@ -1252,81 +1265,97 @@ int apple_pcie_tunnel_up(struct platform_device *pdev)
 		 readl_relaxed(port->base + PORT_STATUS),
 		 readl_relaxed(port->base + PORT_LINKSTS));
 
-	dev_info(pcie->dev, "tunnel step 1: tunables\n");
-	/* The two tunables macOS re-applies on every plug; "rc" it does not. */
-	for (int i = 0; i < ARRAY_SIZE(pcie->tunables); i++)
-		apple_pcie_tunable_apply(&pcie->tunables[i]);
+	if (apple_pcie_tunnel_steps & BIT(0)) {
+		dev_info(pcie->dev, "tunnel step 1: tunables\n");
+		/* The two tunables macOS re-applies on every plug; "rc" it does not. */
+		for (int i = 0; i < ARRAY_SIZE(pcie->tunables); i++)
+			apple_pcie_tunable_apply(&pcie->tunables[i]);
+	}
 
-	dev_info(pcie->dev, "tunnel step 2: taking the port down\n");
-	/* Take the port down. */
-	writel_relaxed(0x110, port->base + PORT_TUNNEL_PRE_RESET);
-	writel_relaxed(~0, port->base + PORT_INTSTAT);
-	writel_relaxed(~0, port->base + PORT_TUNNEL_CLRSTS);
-	writel_relaxed(~0, port->base + PORT_LINKCMDSTS);
-	writel_relaxed(0, port->base + PORT_LTSSMCTL);
+	if (apple_pcie_tunnel_steps & BIT(1)) {
+		dev_info(pcie->dev, "tunnel step 2: taking the port down\n");
+		/* Take the port down. */
+		writel_relaxed(0x110, port->base + PORT_TUNNEL_PRE_RESET);
+		writel_relaxed(~0, port->base + PORT_INTSTAT);
+		writel_relaxed(~0, port->base + PORT_TUNNEL_CLRSTS);
+		writel_relaxed(~0, port->base + PORT_LINKCMDSTS);
+		writel_relaxed(0, port->base + PORT_LTSSMCTL);
 
-	for (int i = 0; i < port->sid_map_sz; i++)
-		apple_pcie_rid2sid_write(port, i, 0);
+		for (int i = 0; i < port->sid_map_sz; i++)
+			apple_pcie_rid2sid_write(port, i, 0);
 
-	writel_relaxed(~0, port->base + PORT_INTMSK);
-	writel_relaxed(0, port->base + PORT_MSICFG);
-	writel_relaxed(0, port->base + PORT_MSIBASE);
-	writel_relaxed(0, port->base + pcie->hw->port_msiaddr);
-	writel_relaxed(0x10, port->base + PORT_TUNNEL_CFG13C);
+		writel_relaxed(~0, port->base + PORT_INTMSK);
+		writel_relaxed(0, port->base + PORT_MSICFG);
+		writel_relaxed(0, port->base + PORT_MSIBASE);
+		writel_relaxed(0, port->base + pcie->hw->port_msiaddr);
+		writel_relaxed(0x10, port->base + PORT_TUNNEL_CFG13C);
 
-	rmw_clear(PORT_APPCLK_EN, port->base + PORT_APPCLK);
-	rmw_set(PORT_APPCLK_CGDIS, port->base + PORT_APPCLK);
-	writel_relaxed(0x100045, port->base + PORT_TUNNEL_CFG808);
-	rmw_clear(PORT_REFCLK_EN, port->base + PORT_REFCLK);
-	rmw_set(PORT_REFCLK_CGDIS, port->base + PORT_REFCLK);
-	rmw_clear(PORT_PERST_OFF, port->base + pcie->hw->port_perst);
+		rmw_clear(PORT_APPCLK_EN, port->base + PORT_APPCLK);
+		rmw_set(PORT_APPCLK_CGDIS, port->base + PORT_APPCLK);
+		writel_relaxed(0x100045, port->base + PORT_TUNNEL_CFG808);
+		rmw_clear(PORT_REFCLK_EN, port->base + PORT_REFCLK);
+		rmw_set(PORT_REFCLK_CGDIS, port->base + PORT_REFCLK);
+		rmw_clear(PORT_PERST_OFF, port->base + pcie->hw->port_perst);
+	}
 
-	dev_info(pcie->dev, "tunnel step 3: port config\n");
-	writel_relaxed(0x208, port->base + PORT_TUNNEL_CFG130);
-	writel_relaxed(0x10, port->base + PORT_TUNNEL_CFG140);
-	writel_relaxed(0x253770, port->base + PORT_TUNNEL_CFG144);
-	writel_relaxed(0, port->base + PORT_TUNNEL_CFG21C);
-	writel_relaxed(0, port->base + PORT_TUNNEL_CFG81C);
+	if (apple_pcie_tunnel_steps & BIT(2)) {
+		dev_info(pcie->dev, "tunnel step 3: port config\n");
+		writel_relaxed(0x208, port->base + PORT_TUNNEL_CFG130);
+		writel_relaxed(0x10, port->base + PORT_TUNNEL_CFG140);
+		writel_relaxed(0x253770, port->base + PORT_TUNNEL_CFG144);
+		writel_relaxed(0, port->base + PORT_TUNNEL_CFG21C);
+		writel_relaxed(0, port->base + PORT_TUNNEL_CFG81C);
+	}
 
-	dev_info(pcie->dev, "tunnel step 4: port tunable\n");
-	/* The port's own tunable sets bit 0 of the 0x10 just written. */
-	apple_pcie_tunable_apply(&port->tunable);
+	if (apple_pcie_tunnel_steps & BIT(3)) {
+		dev_info(pcie->dev, "tunnel step 4: port tunable\n");
+		/* The port's own tunable sets bit 0 of the 0x10 just written. */
+		apple_pcie_tunable_apply(&port->tunable);
+	}
 
-	dev_info(pcie->dev, "tunnel step 5: releasing reset\n");
-	/* And back up. */
-	rmw_set(PORT_PERST_OFF, port->base + pcie->hw->port_perst);
-	rmw_set(PORT_APPCLK_EN, port->base + PORT_APPCLK);
-	rmw_clear(PORT_APPCLK_CGDIS, port->base + PORT_APPCLK);
-	writel_relaxed(3, port->base + PORT_TUNNEL_ARM);
+	if (apple_pcie_tunnel_steps & BIT(4)) {
+		dev_info(pcie->dev, "tunnel step 5: releasing reset\n");
+		/* And back up. */
+		rmw_set(PORT_PERST_OFF, port->base + pcie->hw->port_perst);
+		rmw_set(PORT_APPCLK_EN, port->base + PORT_APPCLK);
+		rmw_clear(PORT_APPCLK_CGDIS, port->base + PORT_APPCLK);
+		writel_relaxed(3, port->base + PORT_TUNNEL_ARM);
+	}
 
-	dev_info(pcie->dev, "tunnel step 6: MSI\n");
-	/* Put back the MSI configuration the reset above cleared. */
-	writel_relaxed(~0, port->base + PORT_INTSTAT);
-	writel_relaxed(lower_32_bits(DOORBELL_ADDR),
-		       port->base + pcie->hw->port_msiaddr);
-	writel_relaxed(0, port->base + PORT_MSIBASE);
-	writel_relaxed((ilog2(pcie->nvecs) << PORT_MSICFG_L2MSINUM_SHIFT) |
-		       PORT_MSICFG_EN, port->base + PORT_MSICFG);
+	if (apple_pcie_tunnel_steps & BIT(5)) {
+		dev_info(pcie->dev, "tunnel step 6: MSI\n");
+		/* Put back the MSI configuration the reset above cleared. */
+		writel_relaxed(~0, port->base + PORT_INTSTAT);
+		writel_relaxed(lower_32_bits(DOORBELL_ADDR),
+			       port->base + pcie->hw->port_msiaddr);
+		writel_relaxed(0, port->base + PORT_MSIBASE);
+		writel_relaxed((ilog2(pcie->nvecs) << PORT_MSICFG_L2MSINUM_SHIFT) |
+			       PORT_MSICFG_EN, port->base + PORT_MSICFG);
+	}
 
-	dev_info(pcie->dev, "tunnel step 7: link training\n");
-	/* Only now. */
-	reinit_completion(&pcie->event);
-	writel_relaxed(PORT_LTSSMCTL_START, port->base + PORT_LTSSMCTL);
+	if (apple_pcie_tunnel_steps & BIT(6)) {
+		dev_info(pcie->dev, "tunnel step 7: link training\n");
+		reinit_completion(&pcie->event);
+		writel_relaxed(PORT_LTSSMCTL_START, port->base + PORT_LTSSMCTL);
 
-	timeout = link_up_timeout * HZ / 1000;
-	left = wait_for_completion_timeout(&pcie->event, timeout);
+		timeout = link_up_timeout * HZ / 1000;
+		left = wait_for_completion_timeout(&pcie->event, timeout);
+	}
+
 	link_stat = readl_relaxed(port->base + PORT_LINKSTS);
-	dev_info(pcie->dev, "after bring-up: status 0x%08x, link 0x%08x%s\n",
-		 readl_relaxed(port->base + PORT_STATUS), link_stat,
-		 left ? "" : " (timed out)");
+	dev_info(pcie->dev, "after bring-up: status 0x%08x, link 0x%08x\n",
+		 readl_relaxed(port->base + PORT_STATUS), link_stat);
 
 	if (!(link_stat & PORT_LINKSTS_UP))
 		return -ENODEV;
 
-	dev_info(pcie->dev, "tunnel step 8: rescanning the bus\n");
-	pci_lock_rescan_remove();
-	pci_rescan_bus(bridge->bus);
-	pci_unlock_rescan_remove();
+	if (apple_pcie_tunnel_steps & BIT(7)) {
+		dev_info(pcie->dev, "tunnel step 8: rescanning the bus\n");
+		pci_lock_rescan_remove();
+		pci_rescan_bus(bridge->bus);
+		pci_unlock_rescan_remove();
+	}
+
 	dev_info(pcie->dev, "tunnel step 9: done\n");
 
 	return 0;
