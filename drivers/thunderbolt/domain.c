@@ -492,7 +492,7 @@ err_ctl_stop:
 
 	return ret;
 }
-EXPORT_SYMBOL_FOR_MODULES(tb_domain_add, "thunderbolt_apple");
+EXPORT_SYMBOL_NS_GPL(tb_domain_add, "USB4");
 
 /**
  * tb_domain_remove() - Removes and releases a domain
@@ -517,7 +517,7 @@ void tb_domain_remove(struct tb *tb)
 
 	device_unregister(&tb->dev);
 }
-EXPORT_SYMBOL_FOR_MODULES(tb_domain_remove, "thunderbolt_apple");
+EXPORT_SYMBOL_NS_GPL(tb_domain_remove, "USB4");
 
 /**
  * tb_domain_suspend_noirq() - Suspend a domain
@@ -545,6 +545,7 @@ int tb_domain_suspend_noirq(struct tb *tb)
 
 	return ret;
 }
+EXPORT_SYMBOL_NS_GPL(tb_domain_suspend_noirq, "USB4");
 
 /**
  * tb_domain_resume_noirq() - Resume a domain
@@ -567,11 +568,13 @@ int tb_domain_resume_noirq(struct tb *tb)
 
 	return ret;
 }
+EXPORT_SYMBOL_NS_GPL(tb_domain_resume_noirq, "USB4");
 
 int tb_domain_suspend(struct tb *tb)
 {
 	return tb->cm_ops->suspend ? tb->cm_ops->suspend(tb) : 0;
 }
+EXPORT_SYMBOL_NS_GPL(tb_domain_suspend, "USB4");
 
 int tb_domain_freeze_noirq(struct tb *tb)
 {
@@ -586,6 +589,7 @@ int tb_domain_freeze_noirq(struct tb *tb)
 
 	return ret;
 }
+EXPORT_SYMBOL_NS_GPL(tb_domain_freeze_noirq, "USB4");
 
 int tb_domain_thaw_noirq(struct tb *tb)
 {
@@ -599,12 +603,14 @@ int tb_domain_thaw_noirq(struct tb *tb)
 
 	return ret;
 }
+EXPORT_SYMBOL_NS_GPL(tb_domain_thaw_noirq, "USB4");
 
 void tb_domain_complete(struct tb *tb)
 {
 	if (tb->cm_ops->complete)
 		tb->cm_ops->complete(tb);
 }
+EXPORT_SYMBOL_NS_GPL(tb_domain_complete, "USB4");
 
 int tb_domain_runtime_suspend(struct tb *tb)
 {
@@ -792,21 +798,6 @@ int tb_domain_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 			transmit_ring, receive_path, receive_ring);
 }
 
-static void tb_domain_reset_interface(struct tb *tb)
-{
-	struct tb_nhi *nhi = tb->nhi;
-
-	if (!nhi->ops->reset_interface)
-		return;
-
-	guard(mutex)(&tb->lock);
-
-	/* The reset clears the ring state so stop the control channel */
-	tb_ctl_stop(tb->ctl);
-	nhi->ops->reset_interface(nhi);
-	tb_ctl_start(tb->ctl);
-}
-
 /**
  * tb_domain_disconnect_xdomain_paths() - Disable DMA paths for XDomain
  * @tb: Domain disabling the DMA paths
@@ -829,20 +820,11 @@ int tb_domain_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 				       int transmit_path, int transmit_ring,
 				       int receive_path, int receive_ring)
 {
-	int ret;
-
 	if (!tb->cm_ops->disconnect_xdomain_paths)
 		return -ENOTSUPP;
 
-	ret = tb->cm_ops->disconnect_xdomain_paths(tb, xd, transmit_path,
+	return tb->cm_ops->disconnect_xdomain_paths(tb, xd, transmit_path,
 			transmit_ring, receive_path, receive_ring);
-	if (ret)
-		return ret;
-
-	if (tb->nhi->quirks & QUIRK_RESET_DMA_ON_TEARDOWN)
-		tb_domain_reset_interface(tb);
-
-	return 0;
 }
 
 static int disconnect_xdomain(struct device *dev, void *data)
@@ -879,41 +861,10 @@ int tb_domain_disconnect_all_paths(struct tb *tb)
 	return bus_for_each_dev(&tb_bus_type, NULL, tb, disconnect_xdomain);
 }
 
-struct unregister_context {
-	const struct tb *tb;
-	int n;
-};
-
-static int unregister_unplugged_xdomain(struct device *dev, void *data)
-{
-	struct unregister_context *ctx = data;
-	struct tb_xdomain *xd;
-
-	xd = tb_to_xdomain(dev);
-	if (xd && xd->tb == ctx->tb && xd->is_unplugged) {
-		tb_xdomain_unregister(xd);
-		ctx->n++;
-	}
-	return 0;
-}
-
-int tb_domain_unregister_unplugged_xdomains(struct tb *tb)
-{
-	struct unregister_context ctx;
-
-	ctx.tb = tb_domain_get(tb);
-	ctx.n = 0;
-	bus_for_each_dev(&tb_bus_type, NULL, &ctx, unregister_unplugged_xdomain);
-	tb_domain_put(tb);
-
-	return ctx.n;
-}
-
 int tb_domain_init(void)
 {
 	int ret;
 
-	tb_configfs_init();
 	tb_debugfs_init();
 	tb_acpi_init();
 
@@ -943,5 +894,4 @@ void tb_domain_exit(void)
 	tb_xdomain_exit();
 	tb_acpi_exit();
 	tb_debugfs_exit();
-	tb_configfs_exit();
 }

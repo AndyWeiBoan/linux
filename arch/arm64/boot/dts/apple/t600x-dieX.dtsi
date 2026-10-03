@@ -486,13 +486,6 @@
 		 * own device tree. Whatever arrives over a tunnel here has to be
 		 * routed through that port's display crossbar. */
 		apple,atc-index = <0>;
-		/*
-		 * The PCIe root complex a PCIe tunnel arriving here lands on.
-		 * There is no hotplug controller on it, so it has to be told
-		 * when a tunnel is built or the device on the far side is
-		 * never found.
-		 */
-		apple,pcie-tunnel-sink = <&DIE_NODE(pciec0)>;
 		reg = <0x7 0x01ac0000 0x0 0xc000>,
 			<0x7 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -641,112 +634,6 @@
 		status = "disabled";
 	};
 
-	/*
-	 * Thunderbolt PCIe host controller for Type-C port 0.
-	 *
-	 * This is the same PCIe root complex IP as the on-package "apcie",
-	 * but its link runs over the Thunderbolt/USB4 fabric instead of a
-	 * dedicated PHY: there is no PERST# GPIO and no refclk handshake to
-	 * perform here, because the ATC PHY (atcphy0) already owns both.
-	 * Apple calls it "apciec,t6000"; the addresses and windows below are
-	 * transcribed from Apple's own device tree on this machine.
-	 *
-	 * m1n1 finds this node through the "usb4_0_pcie" alias and fills in
-	 * apple,tunable-{debug,fabric,rc} here plus apple,tunable on the
-	 * first child node (the port).
-	 */
-	/*
-	 * Kept disabled on purpose. Apple's own device tree gives this DART
-	 * no clock-gates and no power-gates at all, and marks it
-	 * "manual-availability": it is dead until the apciec block above it
-	 * has been powered and brought up. Letting apple-dart bind to it
-	 * straight out of the device tree reads DART_PARAMS on an unpowered
-	 * block and the machine takes an SError in apple_dart_probe() 1.1s
-	 * into boot. Whatever ends up driving apciec has to power the
-	 * controller first and only then hand this over.
-	 */
-	DIE_NODE(pciec0_dart): iommu@721008000 {
-		compatible = "apple,t8110-dart";
-		reg = <0x7 0x21008000 0x0 0x4000>;
-		#iommu-cells = <1>;
-		interrupt-parent = <&aic>;
-		interrupts = <AIC_IRQ DIE_NO 1198 IRQ_TYPE_LEVEL_HIGH>;
-		power-domains = <&DIE_NODE(ps_atc0_pcie)>;
-		status = "disabled";
-	};
-
-	DIE_NODE(pciec0): pcie@730000000 {
-		compatible = "apple,t6000-pciec";
-		device_type = "pci";
-
-		reg = <0x7 0x30000000 0x0 0x10000000>,	/* config */
-			<0x7 0x20000000 0x0 0x4000>,	/* rc */
-			<0x7 0x21000000 0x0 0x8000>,	/* port0 */
-			<0x7 0x20004000 0x0 0x4000>,	/* fabric */
-			<0x7 0x20200000 0x0 0x4000>,	/* debug */
-			<0x7 0x2100c000 0x0 0x4000>,	/* unused */
-			<0x7 0x21010000 0x0 0x4000>;	/* unused */
-		/*
-		 * m1n1 hands us four tunables and names them, but not which
-		 * window each belongs to. "rc" and the port's own are their
-		 * obvious ones. "fabric" sits directly above the rc window,
-		 * where CORE_FABRIC_STAT lives inside the much larger rc
-		 * window of the on-package controller. That leaves the lone
-		 * window 2MB up as "debug". devm_apple_tunable_parse() bounds
-		 * checks each one against the window it is given.
-		 */
-		reg-names = "config", "rc", "port0", "fabric", "debug",
-			"unused0", "unused1";
-
-		interrupt-parent = <&aic>;
-		interrupts = <AIC_IRQ DIE_NO 1197 IRQ_TYPE_LEVEL_HIGH>;
-
-		msi-controller;
-		msi-parent = <&DIE_NODE(pciec0)>;
-		msi-ranges = <&aic AIC_IRQ DIE_NO 1614 IRQ_TYPE_EDGE_RISING 32>;
-
-		iommu-map = <0x100 &DIE_NODE(pciec0_dart) 1 1>;
-		iommu-map-mask = <0xff00>;
-
-		bus-range = <0 128>;
-		#address-cells = <3>;
-		#size-cells = <2>;
-		ranges = <0x43000000 0x8 0x0 0x8 0x0 0x2 0x0>,
-			<0x02000000 0x0 0x100000 0xa 0x100000 0x0 0x3ff00000>,
-			<0x42000000 0x0 0x40000000 0xa 0x40000000 0x0 0x40000000>;
-
-		/*
-		 * Apple's own device tree lists exactly two power-gates for
-		 * apciec0: ATC0_PCIE, which is this one, and a virtual
-		 * AUSB0_AONPCIE-V with no register behind it. Notably not
-		 * ATC0_CIO_PCIE - that one belongs to the Thunderbolt
-		 * controller, which may only power it once it has configured
-		 * the Type-C PHY into USB4 mode. Holding it on from here
-		 * stalls ACIO's lane init with "Pipe command 37 timeout" and
-		 * nothing plugged into any port is ever enumerated.
-		 */
-		power-domains = <&DIE_NODE(ps_atc0_pcie)>;
-		dma-coherent;
-
-		DIE_NODE(pciec0_port): pci@0,0 {
-			device_type = "pci";
-			reg = <0x0 0x0 0x0 0x0 0x0>;
-
-			#address-cells = <3>;
-			#size-cells = <2>;
-			ranges;
-
-			interrupt-controller;
-			#interrupt-cells = <1>;
-
-			interrupt-map-mask = <0 0 0 7>;
-			interrupt-map = <0 0 0 1 &DIE_NODE(pciec0_port) 0 0 0 0>,
-					<0 0 0 2 &DIE_NODE(pciec0_port) 0 0 0 1>,
-					<0 0 0 3 &DIE_NODE(pciec0_port) 0 0 0 2>,
-					<0 0 0 4 &DIE_NODE(pciec0_port) 0 0 0 3>;
-		};
-	};
-
 	DIE_NODE(usb4_1_mbox): mailbox@b01100000 {
 		compatible = "apple,t6000-m3-mailbox",
 			"apple,m3-mailbox-v2";
@@ -767,13 +654,6 @@
 		 * own device tree. Whatever arrives over a tunnel here has to be
 		 * routed through that port's display crossbar. */
 		apple,atc-index = <1>;
-		/*
-		 * The PCIe root complex a PCIe tunnel arriving here lands on.
-		 * There is no hotplug controller on it, so it has to be told
-		 * when a tunnel is built or the device on the far side is
-		 * never found.
-		 */
-		apple,pcie-tunnel-sink = <&DIE_NODE(pciec1)>;
 		reg = <0xb 0x01ac0000 0x0 0xc000>,
 			<0xb 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -929,112 +809,6 @@
 		power-domains = <&DIE_NODE(ps_atc1_usb)>;
 	};
 
-	/*
-	 * Thunderbolt PCIe host controller for Type-C port 1.
-	 *
-	 * This is the same PCIe root complex IP as the on-package "apcie",
-	 * but its link runs over the Thunderbolt/USB4 fabric instead of a
-	 * dedicated PHY: there is no PERST# GPIO and no refclk handshake to
-	 * perform here, because the ATC PHY (atcphy1) already owns both.
-	 * Apple calls it "apciec,t6000"; the addresses and windows below are
-	 * transcribed from Apple's own device tree on this machine.
-	 *
-	 * m1n1 finds this node through the "usb4_1_pcie" alias and fills in
-	 * apple,tunable-{debug,fabric,rc} here plus apple,tunable on the
-	 * first child node (the port).
-	 */
-	/*
-	 * Kept disabled on purpose. Apple's own device tree gives this DART
-	 * no clock-gates and no power-gates at all, and marks it
-	 * "manual-availability": it is dead until the apciec block above it
-	 * has been powered and brought up. Letting apple-dart bind to it
-	 * straight out of the device tree reads DART_PARAMS on an unpowered
-	 * block and the machine takes an SError in apple_dart_probe() 1.1s
-	 * into boot. Whatever ends up driving apciec has to power the
-	 * controller first and only then hand this over.
-	 */
-	DIE_NODE(pciec1_dart): iommu@b21008000 {
-		compatible = "apple,t8110-dart";
-		reg = <0xb 0x21008000 0x0 0x4000>;
-		#iommu-cells = <1>;
-		interrupt-parent = <&aic>;
-		interrupts = <AIC_IRQ DIE_NO 1215 IRQ_TYPE_LEVEL_HIGH>;
-		power-domains = <&DIE_NODE(ps_atc1_pcie)>;
-		status = "disabled";
-	};
-
-	DIE_NODE(pciec1): pcie@b30000000 {
-		compatible = "apple,t6000-pciec";
-		device_type = "pci";
-
-		reg = <0xb 0x30000000 0x0 0x10000000>,	/* config */
-			<0xb 0x20000000 0x0 0x4000>,	/* rc */
-			<0xb 0x21000000 0x0 0x8000>,	/* port0 */
-			<0xb 0x20004000 0x0 0x4000>,	/* fabric */
-			<0xb 0x20200000 0x0 0x4000>,	/* debug */
-			<0xb 0x2100c000 0x0 0x4000>,	/* unused */
-			<0xb 0x21010000 0x0 0x4000>;	/* unused */
-		/*
-		 * m1n1 hands us four tunables and names them, but not which
-		 * window each belongs to. "rc" and the port's own are their
-		 * obvious ones. "fabric" sits directly above the rc window,
-		 * where CORE_FABRIC_STAT lives inside the much larger rc
-		 * window of the on-package controller. That leaves the lone
-		 * window 2MB up as "debug". devm_apple_tunable_parse() bounds
-		 * checks each one against the window it is given.
-		 */
-		reg-names = "config", "rc", "port0", "fabric", "debug",
-			"unused0", "unused1";
-
-		interrupt-parent = <&aic>;
-		interrupts = <AIC_IRQ DIE_NO 1214 IRQ_TYPE_LEVEL_HIGH>;
-
-		msi-controller;
-		msi-parent = <&DIE_NODE(pciec1)>;
-		msi-ranges = <&aic AIC_IRQ DIE_NO 1646 IRQ_TYPE_EDGE_RISING 32>;
-
-		iommu-map = <0x100 &DIE_NODE(pciec1_dart) 1 1>;
-		iommu-map-mask = <0xff00>;
-
-		bus-range = <0 128>;
-		#address-cells = <3>;
-		#size-cells = <2>;
-		ranges = <0x43000000 0xc 0x0 0xc 0x0 0x2 0x0>,
-			<0x02000000 0x0 0x100000 0xe 0x100000 0x0 0x3ff00000>,
-			<0x42000000 0x0 0x40000000 0xe 0x40000000 0x0 0x40000000>;
-
-		/*
-		 * Apple's own device tree lists exactly two power-gates for
-		 * apciec1: ATC1_PCIE, which is this one, and a virtual
-		 * AUSB1_AONPCIE-V with no register behind it. Notably not
-		 * ATC1_CIO_PCIE - that one belongs to the Thunderbolt
-		 * controller, which may only power it once it has configured
-		 * the Type-C PHY into USB4 mode. Holding it on from here
-		 * stalls ACIO's lane init with "Pipe command 37 timeout" and
-		 * nothing plugged into any port is ever enumerated.
-		 */
-		power-domains = <&DIE_NODE(ps_atc1_pcie)>;
-		dma-coherent;
-
-		DIE_NODE(pciec1_port): pci@0,0 {
-			device_type = "pci";
-			reg = <0x0 0x0 0x0 0x0 0x0>;
-
-			#address-cells = <3>;
-			#size-cells = <2>;
-			ranges;
-
-			interrupt-controller;
-			#interrupt-cells = <1>;
-
-			interrupt-map-mask = <0 0 0 7>;
-			interrupt-map = <0 0 0 1 &DIE_NODE(pciec1_port) 0 0 0 0>,
-					<0 0 0 2 &DIE_NODE(pciec1_port) 0 0 0 1>,
-					<0 0 0 3 &DIE_NODE(pciec1_port) 0 0 0 2>,
-					<0 0 0 4 &DIE_NODE(pciec1_port) 0 0 0 3>;
-		};
-	};
-
 	DIE_NODE(usb4_2_mbox): mailbox@f01100000 {
 		compatible = "apple,t6000-m3-mailbox",
 			"apple,m3-mailbox-v2";
@@ -1055,13 +829,6 @@
 		 * own device tree. Whatever arrives over a tunnel here has to be
 		 * routed through that port's display crossbar. */
 		apple,atc-index = <2>;
-		/*
-		 * The PCIe root complex a PCIe tunnel arriving here lands on.
-		 * There is no hotplug controller on it, so it has to be told
-		 * when a tunnel is built or the device on the far side is
-		 * never found.
-		 */
-		apple,pcie-tunnel-sink = <&DIE_NODE(pciec2)>;
 		reg = <0xf 0x01ac0000 0x0 0xc000>,
 			<0xf 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -1207,112 +974,6 @@
 		apple,atc-phy = <&DIE_NODE(atcphy2)>;
 		#mux-control-cells = <1>;
 		power-domains = <&DIE_NODE(ps_atc2_usb)>;
-	};
-
-	/*
-	 * Thunderbolt PCIe host controller for Type-C port 2.
-	 *
-	 * This is the same PCIe root complex IP as the on-package "apcie",
-	 * but its link runs over the Thunderbolt/USB4 fabric instead of a
-	 * dedicated PHY: there is no PERST# GPIO and no refclk handshake to
-	 * perform here, because the ATC PHY (atcphy2) already owns both.
-	 * Apple calls it "apciec,t6000"; the addresses and windows below are
-	 * transcribed from Apple's own device tree on this machine.
-	 *
-	 * m1n1 finds this node through the "usb4_2_pcie" alias and fills in
-	 * apple,tunable-{debug,fabric,rc} here plus apple,tunable on the
-	 * first child node (the port).
-	 */
-	/*
-	 * Kept disabled on purpose. Apple's own device tree gives this DART
-	 * no clock-gates and no power-gates at all, and marks it
-	 * "manual-availability": it is dead until the apciec block above it
-	 * has been powered and brought up. Letting apple-dart bind to it
-	 * straight out of the device tree reads DART_PARAMS on an unpowered
-	 * block and the machine takes an SError in apple_dart_probe() 1.1s
-	 * into boot. Whatever ends up driving apciec has to power the
-	 * controller first and only then hand this over.
-	 */
-	DIE_NODE(pciec2_dart): iommu@f21008000 {
-		compatible = "apple,t8110-dart";
-		reg = <0xf 0x21008000 0x0 0x4000>;
-		#iommu-cells = <1>;
-		interrupt-parent = <&aic>;
-		interrupts = <AIC_IRQ DIE_NO 1232 IRQ_TYPE_LEVEL_HIGH>;
-		power-domains = <&DIE_NODE(ps_atc2_pcie)>;
-		status = "disabled";
-	};
-
-	DIE_NODE(pciec2): pcie@f30000000 {
-		compatible = "apple,t6000-pciec";
-		device_type = "pci";
-
-		reg = <0xf 0x30000000 0x0 0x10000000>,	/* config */
-			<0xf 0x20000000 0x0 0x4000>,	/* rc */
-			<0xf 0x21000000 0x0 0x8000>,	/* port0 */
-			<0xf 0x20004000 0x0 0x4000>,	/* fabric */
-			<0xf 0x20200000 0x0 0x4000>,	/* debug */
-			<0xf 0x2100c000 0x0 0x4000>,	/* unused */
-			<0xf 0x21010000 0x0 0x4000>;	/* unused */
-		/*
-		 * m1n1 hands us four tunables and names them, but not which
-		 * window each belongs to. "rc" and the port's own are their
-		 * obvious ones. "fabric" sits directly above the rc window,
-		 * where CORE_FABRIC_STAT lives inside the much larger rc
-		 * window of the on-package controller. That leaves the lone
-		 * window 2MB up as "debug". devm_apple_tunable_parse() bounds
-		 * checks each one against the window it is given.
-		 */
-		reg-names = "config", "rc", "port0", "fabric", "debug",
-			"unused0", "unused1";
-
-		interrupt-parent = <&aic>;
-		interrupts = <AIC_IRQ DIE_NO 1231 IRQ_TYPE_LEVEL_HIGH>;
-
-		msi-controller;
-		msi-parent = <&DIE_NODE(pciec2)>;
-		msi-ranges = <&aic AIC_IRQ DIE_NO 1678 IRQ_TYPE_EDGE_RISING 32>;
-
-		iommu-map = <0x100 &DIE_NODE(pciec2_dart) 1 1>;
-		iommu-map-mask = <0xff00>;
-
-		bus-range = <0 128>;
-		#address-cells = <3>;
-		#size-cells = <2>;
-		ranges = <0x43000000 0x10 0x0 0x10 0x0 0x2 0x0>,
-			<0x02000000 0x0 0x100000 0x12 0x100000 0x0 0x3ff00000>,
-			<0x42000000 0x0 0x40000000 0x12 0x40000000 0x0 0x40000000>;
-
-		/*
-		 * Apple's own device tree lists exactly two power-gates for
-		 * apciec2: ATC2_PCIE, which is this one, and a virtual
-		 * AUSB2_AONPCIE-V with no register behind it. Notably not
-		 * ATC2_CIO_PCIE - that one belongs to the Thunderbolt
-		 * controller, which may only power it once it has configured
-		 * the Type-C PHY into USB4 mode. Holding it on from here
-		 * stalls ACIO's lane init with "Pipe command 37 timeout" and
-		 * nothing plugged into any port is ever enumerated.
-		 */
-		power-domains = <&DIE_NODE(ps_atc2_pcie)>;
-		dma-coherent;
-
-		DIE_NODE(pciec2_port): pci@0,0 {
-			device_type = "pci";
-			reg = <0x0 0x0 0x0 0x0 0x0>;
-
-			#address-cells = <3>;
-			#size-cells = <2>;
-			ranges;
-
-			interrupt-controller;
-			#interrupt-cells = <1>;
-
-			interrupt-map-mask = <0 0 0 7>;
-			interrupt-map = <0 0 0 1 &DIE_NODE(pciec2_port) 0 0 0 0>,
-					<0 0 0 2 &DIE_NODE(pciec2_port) 0 0 0 1>,
-					<0 0 0 3 &DIE_NODE(pciec2_port) 0 0 0 2>,
-					<0 0 0 4 &DIE_NODE(pciec2_port) 0 0 0 3>;
-		};
 	};
 
 	DIE_NODE(usb4_3_mbox): mailbox@1301100000 {

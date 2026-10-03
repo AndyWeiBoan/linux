@@ -283,12 +283,6 @@ static void ring_write_descriptors(struct tb_ring *ring)
 {
 	struct ring_frame *frame, *n;
 	struct ring_desc *descriptor;
-	u32 flags;
-
-	flags = RING_DESC_POSTED;
-	if (!(ring->flags & RING_FLAG_NO_INTERRUPT))
-		flags |= RING_DESC_INTERRUPT;
-
 	list_for_each_entry_safe(frame, n, &ring->queue, list) {
 		if (ring_full(ring))
 			break;
@@ -296,7 +290,7 @@ static void ring_write_descriptors(struct tb_ring *ring)
 		descriptor = &ring->descriptors[ring->head];
 		descriptor->phys = frame->buffer_phy;
 		descriptor->time = 0;
-		descriptor->flags = flags;
+		descriptor->flags = RING_DESC_POSTED | RING_DESC_INTERRUPT;
 		if (ring->is_tx) {
 			descriptor->length = frame->size;
 			descriptor->eof = frame->eof;
@@ -367,8 +361,6 @@ invoke_callback:
 		if (frame->callback)
 			frame->callback(ring, frame, canceled);
 	}
-
-	wake_up(&ring->wait);
 }
 
 int __tb_ring_enqueue(struct tb_ring *ring, struct ring_frame *frame)
@@ -393,9 +385,8 @@ EXPORT_SYMBOL_GPL(__tb_ring_enqueue);
  * @ring: Ring to poll
  *
  * This function can be called when @start_poll callback of the @ring
- * has been called or the ring is created with %RING_FLAG_NO_INTERRUPT.
- * It will read one completed frame from the ring and return it to the
- * caller.
+ * has been called. It will read one completed frame from the ring and
+ * return it to the caller.
  *
  * Return: Pointer to &struct ring_frame, %NULL if there is no more
  * completed frames.
@@ -611,12 +602,6 @@ static struct tb_ring *tb_ring_alloc(struct tb_nhi *nhi, u32 hop, int size,
 	dev_dbg(nhi->dev, "allocating %s ring %d of size %d\n",
 		transmit ? "TX" : "RX", hop, size);
 
-	if ((flags & RING_FLAG_NO_INTERRUPT) && start_poll) {
-		dev_WARN(nhi->dev,
-			 "start_poll() and NO_INTERRUPT cannot be used at the same time\n");
-		return NULL;
-	}
-
 	ring = kzalloc_obj(*ring);
 	if (!ring)
 		return NULL;
@@ -625,7 +610,6 @@ static struct tb_ring *tb_ring_alloc(struct tb_nhi *nhi, u32 hop, int size,
 	INIT_LIST_HEAD(&ring->queue);
 	INIT_LIST_HEAD(&ring->in_flight);
 	INIT_WORK(&ring->work, ring_work);
-	init_waitqueue_head(&ring->wait);
 
 	ring->nhi = nhi;
 	ring->hop = hop;
@@ -650,7 +634,7 @@ static struct tb_ring *tb_ring_alloc(struct tb_nhi *nhi, u32 hop, int size,
 	if (nhi_alloc_hop(nhi, ring))
 		goto err_free_descs;
 
-	if (!(flags & RING_FLAG_NO_INTERRUPT) && nhi->ops->request_ring_irq) {
+	if (nhi->ops && nhi->ops->request_ring_irq) {
 		if (nhi->ops->request_ring_irq(ring, flags & RING_FLAG_NO_SUSPEND))
 			goto err_free_hop;
 	}
@@ -769,39 +753,13 @@ void tb_ring_start(struct tb_ring *ring)
 		ring_iowrite32desc(ring, (frame_size << 16) | ring->size, 12);
 	nhi_ring_configure(ring, flags, e2e_flags);
 
-	if (!(ring->flags & RING_FLAG_NO_INTERRUPT))
-		nhi_ring_interrupt_active(ring, true);
+	nhi_ring_interrupt_active(ring, true);
 	ring->running = true;
 err:
 	spin_unlock(&ring->lock);
 	spin_unlock_irq(&ring->nhi->lock);
 }
 EXPORT_SYMBOL_GPL(tb_ring_start);
-
-static bool tb_ring_empty(struct tb_ring *ring)
-{
-	guard(spinlock_irqsave)(&ring->lock);
-	return list_empty(&ring->in_flight);
-}
-
-/**
- * tb_ring_flush() - Waits for a ring to be empty
- * @ring: Ring to wait
- * @timeout_msec: Timeout in ms how long to wait.
- *
- * This can be called before stopping a ring to make sure all the frames
- * submitted prior have been completed.
- *
- * Return: %true if the ring is empty now, %false otherwise.
- */
-bool tb_ring_flush(struct tb_ring *ring, unsigned int timeout_msec)
-{
-	if (!wait_event_timeout(ring->wait, tb_ring_empty(ring),
-				msecs_to_jiffies(timeout_msec)))
-		return false;
-	return tb_ring_empty(ring);
-}
-EXPORT_SYMBOL_GPL(tb_ring_flush);
 
 /**
  * tb_ring_stop() - shutdown a ring
@@ -830,8 +788,7 @@ void tb_ring_stop(struct tb_ring *ring)
 			 RING_TYPE(ring), ring->hop);
 		goto err;
 	}
-	if (!(ring->flags & RING_FLAG_NO_INTERRUPT))
-		nhi_ring_interrupt_active(ring, false);
+	nhi_ring_interrupt_active(ring, false);
 
 	ring_iowrite32options(ring, 0, 0);
 	ring_iowrite64desc(ring, 0, 0);
@@ -883,7 +840,7 @@ void tb_ring_free(struct tb_ring *ring)
 	}
 	spin_unlock_irq(&ring->nhi->lock);
 
-	if (nhi->ops->release_ring_irq)
+	if (nhi->ops && nhi->ops->release_ring_irq)
 		nhi->ops->release_ring_irq(ring);
 
 	dma_free_coherent(ring->nhi->dev,
@@ -1052,7 +1009,7 @@ static int __nhi_suspend_noirq(struct device *dev, bool wakeup)
 	if (ret)
 		return ret;
 
-	if (nhi->ops->suspend_noirq) {
+	if (nhi->ops && nhi->ops->suspend_noirq) {
 		ret = nhi->ops->suspend_noirq(tb->nhi, wakeup);
 		if (ret)
 			return ret;
@@ -1115,7 +1072,7 @@ static int nhi_resume_noirq(struct device *dev)
 	 */
 	if ((nhi->ops->is_present && !nhi->ops->is_present(nhi))) {
 		nhi->going_away = true;
-	} else if (nhi->ops->resume_noirq) {
+	} else if (nhi->ops && nhi->ops->resume_noirq) {
 		ret = nhi->ops->resume_noirq(nhi);
 		if (ret)
 			return ret;
@@ -1156,7 +1113,7 @@ static int nhi_runtime_suspend(struct device *dev)
 	if (ret)
 		return ret;
 
-	if (nhi->ops->runtime_suspend) {
+	if (nhi->ops && nhi->ops->runtime_suspend) {
 		ret = nhi->ops->runtime_suspend(tb->nhi);
 		if (ret)
 			return ret;
@@ -1170,7 +1127,7 @@ static int nhi_runtime_resume(struct device *dev)
 	struct tb_nhi *nhi = tb->nhi;
 	int ret;
 
-	if (nhi->ops->runtime_resume) {
+	if (nhi->ops && nhi->ops->runtime_resume) {
 		ret = nhi->ops->runtime_resume(nhi);
 		if (ret)
 			return ret;
@@ -1195,7 +1152,7 @@ void nhi_shutdown(struct tb_nhi *nhi)
 	}
 	nhi_disable_interrupts(nhi);
 
-	if (nhi->ops->shutdown)
+	if (nhi->ops && nhi->ops->shutdown)
 		nhi->ops->shutdown(nhi);
 }
 
@@ -1230,32 +1187,6 @@ static void nhi_reset(struct tb_nhi *nhi)
 	dev_warn(nhi->dev, "timeout resetting host router\n");
 }
 
-/**
- * nhi_reset_interface() - Reset the host interface
- * @nhi: Host interface to reset
- *
- * Brings the registers in the memory BAR back to their default state and
- * clears the End-to-End Flow Control state. The caller is responsible for
- * stopping the control channel over the reset because it clears the ring
- * state as well.
- */
-void nhi_reset_interface(struct tb_nhi *nhi)
-{
-	u32 val;
-
-	val = ioread32(nhi->iobase + REG_CAPS);
-	/* Only v1 host interfaces implement the reset */
-	if (FIELD_GET(REG_CAPS_VERSION_MASK, val) >= REG_CAPS_VERSION_2)
-		return;
-
-	dev_dbg(nhi->dev, "issuing host interface reset\n");
-
-	iowrite32(REG_HOST_INTERFACE_RESET_RST,
-		  nhi->iobase + REG_HOST_INTERFACE_RESET);
-	/* Wait for tHIReset (10 ms) to complete */
-	usleep_range(10000, 20000);
-}
-
 static struct tb *nhi_select_cm(struct tb_nhi *nhi)
 {
 	struct tb *tb;
@@ -1285,15 +1216,8 @@ int nhi_probe(struct tb_nhi *nhi)
 	struct tb *tb;
 	int res;
 
-	if (!nhi->ops)
-		return dev_err_probe(dev, -EINVAL, "NHI ops not set\n");
-
-	if (!nhi->ops->init_interrupts)
-		return dev_err_probe(dev, -EINVAL, "missing required NHI ops\n");
-
 	if (!nhi->ring_layout)
 		nhi->ring_layout = &nhi_default_ring_layout;
-
 	nhi->hop_count = ioread32(nhi->iobase + REG_CAPS) & 0x3ff;
 	dev_dbg(dev, "total paths: %d\n", nhi->hop_count);
 
@@ -1309,9 +1233,11 @@ int nhi_probe(struct tb_nhi *nhi)
 	/* In case someone left them on. */
 	nhi_disable_interrupts(nhi);
 
-	res = nhi->ops->init_interrupts(nhi);
-	if (res)
-		return dev_err_probe(dev, res, "cannot enable interrupts, aborting\n");
+	if (nhi->ops && nhi->ops->init_interrupts) {
+		res = nhi->ops->init_interrupts(nhi);
+		if (res)
+			return dev_err_probe(dev, res, "cannot enable interrupts, aborting\n");
+	}
 
 	spin_lock_init(&nhi->lock);
 
@@ -1319,10 +1245,10 @@ int nhi_probe(struct tb_nhi *nhi)
 	if (res)
 		return dev_err_probe(dev, res, "failed to set DMA mask\n");
 
-	if (nhi->ops->init) {
+	if (nhi->ops && nhi->ops->init) {
 		res = nhi->ops->init(nhi);
 		if (res)
-			return dev_err_probe(dev, res, "NHI specific init failed\n");
+			return res;
 	}
 
 	init_completion(&nhi->domain_released);
@@ -1343,7 +1269,7 @@ int nhi_probe(struct tb_nhi *nhi)
 		tb_domain_put(tb);
 		wait_for_completion(&nhi->domain_released);
 		nhi_shutdown(nhi);
-		return dev_err_probe(dev, res, "failed to add domain\n");
+		return res;
 	}
 	dev_set_drvdata(dev, tb);
 

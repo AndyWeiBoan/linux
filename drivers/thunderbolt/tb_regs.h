@@ -182,7 +182,8 @@ struct tb_regs_switch_header {
 	/* DWORD 4 */
 	u32 plug_events_delay:8; /*
 				  * RW, pause between plug events in
-				  * milliseconds.
+				  * milliseconds. Writing 0x00 is interpreted
+				  * as 255ms.
 				  */
 	u32 cmuv:8;
 	u32 __unknown4:8;
@@ -215,7 +216,6 @@ struct tb_regs_switch_header {
 #define ROUTER_CS_6_WOPS			BIT(2)
 #define ROUTER_CS_6_WOUS			BIT(3)
 #define ROUTER_CS_6_HCI				BIT(18)
-#define ROUTER_CS_6_RR				BIT(24)
 #define ROUTER_CS_6_CR				BIT(25)
 #define ROUTER_CS_7				0x07
 #define ROUTER_CS_9				0x09
@@ -428,6 +428,17 @@ struct tb_regs_port_header {
 #define ADP_DP_CS_2_ESTIMATED_BW_SHIFT		24
 #define ADP_DP_CS_3				0x03
 #define ADP_DP_CS_3_HPDC			BIT(9)
+/*
+ * Apple silicon host DP IN adapter: pulsing this tells the adapter to
+ * propagate HPD to ADP_DP_CS_2_HPD.
+ */
+#define ADP_DP_CS_3_HPD_PROPAGATE		BIT(10)
+/*
+ * Apple silicon host: hold the DP OUT (hub-side) adapter's own link
+ * training off while a tunnel is up -- the host's DPTX trains the sink
+ * through the tunnel itself.
+ */
+#define ADP_DP_CS_3_NO_AUTO_LT			BIT(8)
 #define DP_LOCAL_CAP				0x04
 #define DP_REMOTE_CAP				0x05
 /* For DP IN adapter */
@@ -470,27 +481,18 @@ struct tb_regs_port_header {
 #define ADP_DP_CS_8				0x08
 #define ADP_DP_CS_8_DPME			BIT(30)
 #define ADP_DP_CS_8_DR				BIT(31)
+#define ADP_DP_CS_13				0x0d
+/* USB4 CM Guide 5.4.1.4: DPTX Discovery Mode. Bit position not in that
+ * guide; bit 0 is the enable-style field used on other DP CS words.
+ */
+#define ADP_DP_CS_13_DPTX_DISCOVERY_MODE	BIT(0)
 
 /* PCIe adapter registers */
 #define ADP_PCIE_CS_0				0x00
-#define ADP_PCIE_CS_0_LTSSM_MASK		GENMASK(28, 25)
+#define ADP_PCIE_CS_0_LA			BIT(16)
 #define ADP_PCIE_CS_0_PE			BIT(31)
 #define ADP_PCIE_CS_1				0x01
 #define ADP_PCIE_CS_1_EE			BIT(0)
-
-enum tb_pcie_ltssm_state {
-	USB4_PCIE_LTSSM_DETECT,
-	USB4_PCIE_LTSSM_POLLING,
-	USB4_PCIE_LTSSM_CONFIG,
-	USB4_PCIE_LTSSM_CONFIG_IDLE,
-	USB4_PCIE_LTSSM_RECOVERY,
-	USB4_PCIE_LTSSM_RECOVERY_IDLE,
-	USB4_PCIE_LTSSM_L0,
-	USB4_PCIE_LTSSM_L1,
-	USB4_PCIE_LTSSM_L2,
-	USB4_PCIE_LTSSM_DISABLED,
-	USB4_PCIE_LTSSM_HOT_RESET,
-};
 
 /* USB adapter registers */
 #define ADP_USB3_CS_0				0x00

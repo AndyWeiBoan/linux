@@ -10,21 +10,9 @@
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/delay.h>
+#include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/platform_data/x86/apple.h>
-#include <linux/property.h>
-#include <drm/drm_connector.h>
-#include <linux/of.h>
-#include <linux/of_platform.h>
-#include <linux/platform_device.h>
-
-/*
- * Looked up at run time, never linked against: a display driver that can
- * drive a tunnelled display on more than one port offers this so it can be
- * told which one, and USB4 must not grow a dependency on one for it.
- */
-int dcp_dptx_select_atc(struct platform_device *pdev, unsigned int atc,
-			bool tunnel);
 
 #include "tb.h"
 #include "tb_regs.h"
@@ -104,120 +92,6 @@ static void tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
 				       const char *reason);
 static void tb_queue_dp_bandwidth_request(struct tb *tb, u64 route, u8 port,
 					  int retry, unsigned long delay);
-static void tb_dp_tunnel_active(struct tb_tunnel *tunnel);
-
-/**
- * tb_dp_host_connector_fwnode() - display behind this domain's DP IN adapter
- * @tb: domain the tunnel belongs to
- *
- * On Apple silicon the host side of a DP tunnel is an ACIO block whose device
- * tree node is wired, through the OF graph, to the Type-C connector it serves;
- * the connector in turn points at the display controller that feeds it. The
- * display controller registers its DRM connector under its own fwnode, so walk
- * that chain to find the fwnode an out-of-band hotplug event has to be reported
- * on.
- *
- * Returns NULL on anything that is not wired up this way, which is every
- * non-Apple host - there the Type-C DisplayPort altmode driver reports these
- * events instead.
- */
-static struct fwnode_handle *tb_dp_host_connector_fwnode(struct tb *tb,
-							u32 *atc_index)
-{
-	struct fwnode_handle *host, *sink;
-
-	if (!tb->nhi || !tb->nhi->dev || !tb->nhi->dev->parent)
-		return NULL;
-
-	host = dev_fwnode(tb->nhi->dev->parent);
-	if (!host)
-		return NULL;
-
-	/*
-	 * Which Type-C port this domain serves. The display controller needs
-	 * it to pick that port's crossbar and DP transmitter.
-	 */
-	if (atc_index &&
-	    fwnode_property_read_u32(host, "apple,atc-index", atc_index))
-		return NULL;
-
-	/*
-	 * The controller that drives a tunnelled display here. It is named on
-	 * the host block rather than taken from the Type-C connector, because
-	 * the connector names the one that drives its PHY for a display on
-	 * plain DisplayPort altmode - a different controller doing a different
-	 * job, which has to keep working at the same time.
-	 */
-	sink = fwnode_find_reference(host, "apple,dp-tunnel-sink", 0);
-	if (IS_ERR(sink))
-		return NULL;
-
-	return sink;
-}
-
-/**
- * tb_dp_oob_hotplug() - tell the display controller about a tunnelled display
- * @tunnel: the DP tunnel that just came up or is going away
- * @status: what to report
- *
- * A display reached over a DP tunnel never asserts HPD on the Type-C pins, so
- * the USB-PD controller cannot report it and the display controller would never
- * learn that it has something to drive.
- *
- * Only tunnels whose DP IN adapter sits on the host router are reported: those
- * are the ones this domain's display controller is wired to.
- */
-static void tb_dp_oob_hotplug(struct tb_tunnel *tunnel,
-			      enum drm_connector_status status)
-{
-	struct fwnode_handle *fwnode;
-	u32 atc = 0;
-
-	/*
-	 * Nothing to report to when DRM cannot be called from here, and USB4
-	 * must not start depending on it just for this.
-	 */
-	if (!IS_REACHABLE(CONFIG_DRM))
-		return;
-
-	if (tunnel->type != TB_TUNNEL_DP || !tunnel->src_port ||
-	    tb_route(tunnel->src_port->sw))
-		return;
-
-	fwnode = tb_dp_host_connector_fwnode(tunnel->tb, &atc);
-	if (!fwnode)
-		return;
-
-	/*
-	 * Tell the display controller which port it is about to drive before
-	 * reporting the display, so the connect that follows routes through
-	 * the right crossbar. A controller that only ever serves one port
-	 * does not export this and does not need telling.
-	 */
-	if (status == connector_status_connected) {
-		struct platform_device *pdev;
-		struct device_node *np;
-
-		np = to_of_node(fwnode);
-		pdev = np ? of_find_device_by_node(np) : NULL;
-		if (pdev) {
-			int (*sel)(struct platform_device *, unsigned int, bool);
-
-			sel = symbol_get(dcp_dptx_select_atc);
-			if (sel) {
-				sel(pdev, atc, true);
-				symbol_put(dcp_dptx_select_atc);
-			}
-			put_device(&pdev->dev);
-		}
-	}
-
-	tb_tunnel_dbg(tunnel, "reporting out-of-band hotplug: %d (ATC %u)\n",
-		      status, atc);
-	drm_connector_oob_hotplug_event(fwnode, status);
-	fwnode_handle_put(fwnode);
-}
-
 
 static void tb_queue_hotplug(struct tb *tb, u64 route, u8 port, bool unplug)
 {
@@ -227,7 +101,7 @@ static void tb_queue_hotplug(struct tb *tb, u64 route, u8 port, bool unplug)
 	if (!ev)
 		return;
 
-	ev->tb = tb_domain_get(tb);
+	ev->tb = tb;
 	ev->route = route;
 	ev->port = port;
 	ev->unplug = unplug;
@@ -514,8 +388,7 @@ static void tb_switch_discover_tunnels(struct tb_switch *sw,
 
 		switch (port->config.type) {
 		case TB_TYPE_DP_HDMI_IN:
-			tunnel = tb_tunnel_discover_dp(tb, port, alloc_hopids,
-						       tb_dp_tunnel_active);
+			tunnel = tb_tunnel_discover_dp(tb, port, alloc_hopids);
 			tb_increase_tmu_accuracy(tunnel);
 			break;
 
@@ -1832,6 +1705,9 @@ static void tb_discover_tunnels(struct tb *tb)
 		if (tb_tunnel_is_pci(tunnel)) {
 			struct tb_switch *parent = tunnel->dst_port->sw;
 
+			/* Adopt host state only for tunnels retained by this domain. */
+			if (tb_pci_tunnel_activate_host(tunnel))
+				tb_tunnel_warn(tunnel, "failed to adopt PCIe host state\n");
 			while (parent != tunnel->src_port->sw) {
 				parent->boot = true;
 				parent = tb_switch_parent(parent);
@@ -1849,6 +1725,65 @@ static void tb_discover_tunnels(struct tb *tb)
 	}
 }
 
+/*
+ * On some hosts (Apple silicon) the display engine has to be routed to a
+ * DP IN adapter of the host router by hand. Tell the NHI glue when a DP
+ * tunnel starting at one of those adapters comes or goes.
+ */
+static void tb_dp_tunnel_notify(struct tb_tunnel *tunnel, bool active)
+{
+	struct tb_port *in = tunnel->src_port;
+
+	/*
+	 * Only undo what was announced: a tunnel can be released twice (at
+	 * tb_stop() and by a late DPRX failure), the second time after the
+	 * host router is gone.
+	 */
+	if (!active && !tunnel->host_dp_notified)
+		return;
+	if (!tb_tunnel_is_dp(tunnel) || !tb_port_is_apple_host_dpin(in))
+		return;
+	/*
+	 * After both DP adapters are enabled, pulse the DP IN adapter's HPD
+	 * propagation bit for 10 ms and wait up to 2 s for its HPD status, so
+	 * HPD has reached the host before the display side starts. This runs
+	 * under tb->lock; HPD normally follows at once, 2 s is the worst case.
+	 */
+	if (active && in->cap_adap) {
+		int i, hpd = 0;
+		u32 v;
+
+		if (tb_port_read(in, &v, TB_CFG_PORT, in->cap_adap + ADP_DP_CS_3, 1)) {
+			tb_port_warn(in, "cannot read DP adapter state, HPD not pulsed\n");
+		} else {
+			/* HPDC may still be set from a previous tunnel's teardown */
+			v &= ~ADP_DP_CS_3_HPDC;
+			v |= ADP_DP_CS_3_HPD_PROPAGATE;
+			if (tb_port_write(in, &v, TB_CFG_PORT, in->cap_adap + ADP_DP_CS_3, 1)) {
+				tb_port_warn(in, "cannot pulse HPD propagation\n");
+				goto notify;
+			}
+			usleep_range(10000, 11000);
+			v &= ~ADP_DP_CS_3_HPD_PROPAGATE;
+			if (tb_port_write(in, &v, TB_CFG_PORT, in->cap_adap + ADP_DP_CS_3, 1))
+				tb_port_warn(in, "cannot end HPD propagation pulse\n");
+			for (i = 0; i < 200; i++) {
+				hpd = tb_dp_port_hpd_is_active(in);
+				if (hpd)
+					break;
+				usleep_range(10000, 11000);
+			}
+			if (hpd < 0)
+				tb_port_warn(in, "cannot read HPD status: %d\n", hpd);
+			else if (!hpd)
+				tb_port_warn(in, "HPD did not propagate\n");
+		}
+	}
+notify:
+	tunnel->host_dp_notified = active;
+	tunnel->tb->nhi->ops->dp_tunnel_changed(tunnel->tb->nhi, in->port, active);
+}
+
 static void tb_deactivate_and_free_tunnel(struct tb_tunnel *tunnel)
 {
 	struct tb_port *src_port, *dst_port;
@@ -1857,6 +1792,7 @@ static void tb_deactivate_and_free_tunnel(struct tb_tunnel *tunnel)
 	if (!tunnel)
 		return;
 
+	tb_dp_tunnel_notify(tunnel, false);
 	tb_tunnel_deactivate(tunnel);
 	list_del(&tunnel->list);
 
@@ -1866,7 +1802,6 @@ static void tb_deactivate_and_free_tunnel(struct tb_tunnel *tunnel)
 
 	switch (tunnel->type) {
 	case TB_TUNNEL_DP:
-		tb_dp_oob_hotplug(tunnel, connector_status_disconnected);
 		tb_detach_bandwidth_group(src_port);
 		/*
 		 * In case of DP tunnel make sure the DP IN resource is
@@ -2034,25 +1969,15 @@ static struct tb_port *tb_find_dp_out(struct tb *tb, struct tb_port *in)
 	return NULL;
 }
 
-static void tb_dp_tunnel_active(struct tb_tunnel *tunnel)
+static void tb_dp_tunnel_active(struct tb_tunnel *tunnel, void *data)
 {
 	struct tb_port *in = tunnel->src_port;
 	struct tb_port *out = tunnel->dst_port;
-	struct tb *tb = tunnel->tb;
+	struct tb *tb = data;
 
-	mutex_lock(&tb->lock);
-
-	/*
-	 * If the DPRX read was canceled the tunnel is already being torn
-	 * down by whoever canceled it. Do not touch the adapters here
-	 * because the routers may be gone by now.
-	 */
-	if (tunnel->dprx_canceled) {
-		tb_tunnel_dbg(tunnel, "DPRX read canceled, not activating\n");
-		mutex_unlock(&tb->lock);
-		return;
-	}
-
+	lockdep_assert_held(&tb->lock);
+	if (tunnel->dprx_canceled)
+		goto out;
 	if (tb_tunnel_is_active(tunnel)) {
 		int consumed_up, consumed_down, ret;
 
@@ -2094,19 +2019,13 @@ static void tb_dp_tunnel_active(struct tb_tunnel *tunnel)
 		 * happens either because there is no graphics driver
 		 * loaded or not all DP cables where connected to the
 		 * discrete router.
-		 *
-		 * In both cases we remove the DP IN adapter from the
-		 * available resources as it is not usable. This will
-		 * also tear down the tunnel and try to re-use the
-		 * released DP OUT.
-		 *
-		 * It will be added back only if there is hotplug for
-		 * the DP IN again.
 		 */
 		tb_tunnel_warn(tunnel, "not active, tearing down\n");
-		tb_dp_resource_unavailable(tb, in, "DPRX negotiation failed");
+		tb_dp_resource_unavailable(tb, in,
+					   "DPRX negotiation failed");
 	}
-	mutex_unlock(&tb->lock);
+out:
+	tb_domain_put(tb);
 }
 
 static void tb_tunnel_one_dp(struct tb *tb, struct tb_port *in,
@@ -2167,7 +2086,8 @@ static void tb_tunnel_one_dp(struct tb *tb, struct tb_port *in,
 	       available_up, available_down);
 
 	tunnel = tb_tunnel_alloc_dp(tb, in, out, link_nr, available_up,
-				    available_down, tb_dp_tunnel_active);
+				    available_down, tb_dp_tunnel_active,
+				    tb_domain_get(tb));
 	if (!tunnel) {
 		tb_port_dbg(out, "could not allocate DP tunnel\n");
 		goto err_reclaim_usb;
@@ -2182,20 +2102,14 @@ static void tb_tunnel_one_dp(struct tb *tb, struct tb_port *in,
 		goto err_free;
 	}
 
-	/*
-	 * Report as soon as the paths carry traffic, not when the DPRX read
-	 * finishes: on a host whose DP source only starts driving the link
-	 * once it has been told about the display, that read cannot complete
-	 * until this event has been delivered.
-	 */
-	tb_dp_oob_hotplug(tunnel, connector_status_connected);
-
+	tb_dp_tunnel_notify(tunnel, true);
 	return;
 
 err_free:
 	tb_tunnel_put(tunnel);
 err_reclaim_usb:
 	tb_reclaim_usb3_bandwidth(tb, in, out);
+	tb_domain_put(tb);
 err_detach_group:
 	tb_detach_bandwidth_group(in);
 err_dealloc_dp:
@@ -2419,49 +2333,6 @@ static int tb_disconnect_pci(struct tb *tb, struct tb_switch *sw)
 	return 0;
 }
 
-/* Looked up at run time, never linked against: see tb_dp_oob_hotplug(). */
-int apple_pcie_tunnel_up(struct platform_device *pdev);
-
-/*
- * Tell the root complex a PCIe tunnel landed on it. On a PC the root port has
- * a hotplug controller that notices by itself; this one does not, and until
- * something re-arms link training and rescans, the device on the far side of
- * the tunnel is simply never found.
- */
-static void tb_pci_tunnel_up(struct tb *tb)
-{
-	int (*up)(struct platform_device *);
-	struct platform_device *pdev;
-	struct fwnode_handle *host, *sink;
-	struct device_node *np;
-
-	if (!IS_REACHABLE(CONFIG_PCIE_APPLE))
-		return;
-	if (!tb->nhi || !tb->nhi->dev || !tb->nhi->dev->parent)
-		return;
-
-	host = dev_fwnode(tb->nhi->dev->parent);
-	if (!host)
-		return;
-
-	sink = fwnode_find_reference(host, "apple,pcie-tunnel-sink", 0);
-	if (IS_ERR(sink))
-		return;
-
-	np = to_of_node(sink);
-	pdev = np ? of_find_device_by_node(np) : NULL;
-	fwnode_handle_put(sink);
-	if (!pdev)
-		return;
-
-	up = symbol_get(apple_pcie_tunnel_up);
-	if (up) {
-		up(pdev);
-		symbol_put(apple_pcie_tunnel_up);
-	}
-	put_device(&pdev->dev);
-}
-
 static int tb_tunnel_pci(struct tb *tb, struct tb_switch *sw)
 {
 	struct tb_port *up, *down, *port;
@@ -2503,9 +2374,6 @@ static int tb_tunnel_pci(struct tb *tb, struct tb_switch *sw)
 		tb_sw_warn(sw, "failed to connect xHCI\n");
 
 	list_add_tail(&tunnel->list, &tcm->tunnel_list);
-
-	tb_pci_tunnel_up(tb);
-
 	return 0;
 }
 
@@ -2717,13 +2585,8 @@ put_sw:
 out:
 	mutex_unlock(&tb->lock);
 
-	tb_domain_unregister_unplugged_xdomains(tb);
-
 	pm_runtime_mark_last_busy(&tb->dev);
 	pm_runtime_put_autosuspend(&tb->dev);
-
-	/* Undo the refcount increased in tb_queue_hotplug() */
-	tb_domain_put(tb);
 
 	kfree(ev);
 }
@@ -3042,9 +2905,6 @@ static void tb_handle_dp_bandwidth_request(struct work_struct *work)
 
 		/* Update other clients about the allocation change */
 		tb_recalc_estimated_bandwidth(tb);
-
-		tb_dbg(tb, "checking if more DP tunnels can be established now\n");
-		tb_tunnel_dp(tb);
 	}
 
 put_sw:
@@ -3083,6 +2943,8 @@ static void tb_handle_notification(struct tb *tb, u64 route,
 	case TB_CFG_ERROR_PCIE_WAKE:
 	case TB_CFG_ERROR_DP_CON_CHANGE:
 	case TB_CFG_ERROR_DPTX_DISCOVERY:
+		tb_info(tb, "DPTX discovery notification route=%llx port=%u\n",
+			route, error->port);
 		if (tb_cfg_ack_notification(tb->ctl, route, error))
 			tb_warn(tb, "could not ack notification on %llx\n",
 				route);
@@ -3141,18 +3003,20 @@ static void tb_stop(struct tb *tb)
 	/* tunnels are only present after everything has been initialized */
 	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list) {
 		/*
-		 * DMA tunnels and DP tunnels which are not yet active require
-		 * the driver to be functional so we tear them down.
-		 * Other protocol tunnels can be left intact.
+		 * DMA tunnels require the driver to be functional so we
+		 * tear them down. Other protocol tunnels can be left
+		 * intact.
 		 */
 		if (tb_tunnel_is_dma(tunnel))
 			tb_tunnel_deactivate(tunnel);
-		else if (tb_tunnel_is_dp(tunnel) && !tb_tunnel_is_active(tunnel))
-			tb_tunnel_deactivate(tunnel);
+		/* the host side of a DP tunnel goes away with us */
+		else if (tb_tunnel_is_dp(tunnel)) {
+			tb_dp_tunnel_notify(tunnel, false);
+			tb_dp_tunnel_deactivate_host(tunnel);
+		}
 		tb_tunnel_put(tunnel);
 	}
 	tb_switch_remove(tb->root_switch);
-	tb->root_switch = NULL;
 	tcm->hotplug_active = false; /* signal tb_handle_hotplug to quit */
 }
 
@@ -3195,8 +3059,7 @@ static int tb_start(struct tb *tb, bool reset)
 
 	tb->root_switch = tb_switch_alloc(tb, &tb->dev, 0);
 	if (IS_ERR(tb->root_switch))
-		return dev_err_probe(tb->nhi->dev, PTR_ERR(tb->root_switch),
-				     "failed to allocate host router\n");
+		return PTR_ERR(tb->root_switch);
 
 	/*
 	 * ICM firmware upgrade needs running firmware and in native
@@ -3228,14 +3091,14 @@ static int tb_start(struct tb *tb, bool reset)
 	ret = tb_switch_configure(tb->root_switch);
 	if (ret) {
 		tb_switch_put(tb->root_switch);
-		return dev_err_probe(tb->nhi->dev, ret, "failed to configure host router\n");
+		return ret;
 	}
 
 	/* Announce the switch to the world */
 	ret = tb_switch_add(tb->root_switch);
 	if (ret) {
 		tb_switch_put(tb->root_switch);
-		return dev_err_probe(tb->nhi->dev, ret, "failed to add host router\n");
+		return ret;
 	}
 
 	/*
@@ -3289,7 +3152,12 @@ static int tb_suspend_noirq(struct tb *tb)
 	struct tb_cm *tcm = tb_priv(tb);
 
 	tb_dbg(tb, "suspending...\n");
-	tb_disconnect_and_release_dp(tb);
+	/*
+	 * Kept tunnels survive the sleep. Keep DP ones as well, so a display
+	 * behind a dock is only powered down, not reported as unplugged.
+	 */
+	if (!(tb->nhi->quirks & QUIRK_KEEP_TUNNELS))
+		tb_disconnect_and_release_dp(tb);
 	tb_switch_exit_redrive(tb->root_switch);
 	tb_switch_suspend(tb->root_switch, false);
 	tcm->hotplug_active = false; /* signal tb_handle_hotplug to quit */
@@ -3330,24 +3198,6 @@ static void tb_restore_children(struct tb_switch *sw)
 	}
 }
 
-static void tb_free_unplugged_xdomains(struct tb_switch *sw)
-{
-	struct tb_port *port;
-
-	tb_switch_for_each_port(sw, port) {
-		if (tb_is_upstream_port(port))
-			continue;
-		if (port->xdomain && port->xdomain->is_unplugged) {
-			tb_retimer_remove_all(port);
-			tb_xdomain_remove(port->xdomain);
-			tb_port_unconfigure_xdomain(port);
-			port->xdomain = NULL;
-		} else if (port->remote) {
-			tb_free_unplugged_xdomains(port->remote->sw);
-		}
-	}
-}
-
 static int tb_resume_noirq(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
@@ -3367,8 +3217,16 @@ static int tb_resume_noirq(struct tb *tb)
 	tb_switch_resume(tb->root_switch, false);
 	tb_free_invalid_tunnels(tb);
 	tb_free_unplugged_children(tb->root_switch);
-	tb_free_unplugged_xdomains(tb->root_switch);
 	tb_restore_children(tb->root_switch);
+
+	/*
+	 * Routers that stayed awake still carry our tunnels. Restarting them
+	 * would take down links the hosts kept up through the sleep.
+	 */
+	if (tb->nhi->quirks & QUIRK_KEEP_TUNNELS) {
+		tb_dbg(tb, "tunnels kept across sleep\n");
+		goto out;
+	}
 
 	/*
 	 * If we get here from suspend to disk the boot firmware or the
@@ -3402,12 +3260,35 @@ static int tb_resume_noirq(struct tb *tb)
 		tb_dbg(tb, "tunnels restarted, sleeping for 100ms\n");
 		msleep(100);
 	}
+out:
 	tb_switch_enter_redrive(tb->root_switch);
 	 /* Allow tb_handle_hotplug to progress events */
 	tcm->hotplug_active = true;
 	tb_dbg(tb, "resume finished\n");
 
 	return 0;
+}
+
+static int tb_free_unplugged_xdomains(struct tb_switch *sw)
+{
+	struct tb_port *port;
+	int ret = 0;
+
+	tb_switch_for_each_port(sw, port) {
+		if (tb_is_upstream_port(port))
+			continue;
+		if (port->xdomain && port->xdomain->is_unplugged) {
+			tb_retimer_remove_all(port);
+			tb_xdomain_remove(port->xdomain);
+			tb_port_unconfigure_xdomain(port);
+			port->xdomain = NULL;
+			ret++;
+		} else if (port->remote) {
+			ret += tb_free_unplugged_xdomains(port->remote->sw);
+		}
+	}
+
+	return ret;
 }
 
 static int tb_freeze_noirq(struct tb *tb)
@@ -3426,17 +3307,62 @@ static int tb_thaw_noirq(struct tb *tb)
 	return 0;
 }
 
+static bool tb_dp_resource_listed(struct tb *tb, struct tb_port *port)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+	struct tb_port *p;
+
+	list_for_each_entry(p, &tcm->dp_resources, list) {
+		if (p == port)
+			return true;
+	}
+	return false;
+}
+
+static void tb_restore_dp_resources(struct tb_switch *sw)
+{
+	struct tb_cm *tcm = tb_priv(sw->tb);
+	struct tb_port *port;
+
+	if (sw->is_unplugged)
+		return;
+
+	tb_switch_for_each_port(sw, port) {
+		if (tb_port_has_remote(port)) {
+			tb_restore_dp_resources(port->remote->sw);
+		} else if (tb_port_is_dpin(port)) {
+			if (tb_dp_resource_listed(sw->tb, port) ||
+			    !tb_switch_query_dp_resource(sw, port))
+				continue;
+			tb_port_dbg(port, "DP IN resource available after resume\n");
+			list_add_tail(&port->list, &tcm->dp_resources);
+		} else if (tb_port_is_dpout(port) &&
+			   tb_dp_port_hpd_is_active(port) == 1 &&
+			   !tb_dp_port_is_enabled(port)) {
+			tb_dp_resource_available(sw->tb, port);
+		}
+	}
+}
+
 static void tb_complete(struct tb *tb)
 {
 	/*
-	 * Unregister unplugged XDomains and if there is a case where
+	 * Release any unplugged XDomains and if there is a case where
 	 * another domain is swapped in place of unplugged XDomain we
 	 * need to run another rescan.
 	 */
-	if (tb_domain_unregister_unplugged_xdomains(tb)) {
-		scoped_guard(mutex, &tb->lock)
-			tb_scan_switch(tb->root_switch);
+	mutex_lock(&tb->lock);
+	if (tb_free_unplugged_xdomains(tb->root_switch))
+		tb_scan_switch(tb->root_switch);
+	/*
+	 * Routers kept awake through system sleep send no plug events for
+	 * the DP resources released at suspend, so pair them up again here.
+	 */
+	if (tb->nhi->quirks & QUIRK_NO_SYSTEM_SLEEP) {
+		tb_restore_dp_resources(tb->root_switch);
+		tb_tunnel_dp(tb);
 	}
+	mutex_unlock(&tb->lock);
 }
 
 static int tb_runtime_suspend(struct tb *tb)
@@ -3463,11 +3389,11 @@ static void tb_remove_work(struct work_struct *work)
 	struct tb *tb = tcm_to_tb(tcm);
 
 	mutex_lock(&tb->lock);
-	if (tb->root_switch)
+	if (tb->root_switch) {
 		tb_free_unplugged_children(tb->root_switch);
+		tb_free_unplugged_xdomains(tb->root_switch);
+	}
 	mutex_unlock(&tb->lock);
-
-	tb_free_unplugged_xdomains(tb->root_switch);
 }
 
 static int tb_runtime_resume(struct tb *tb)
@@ -3615,4 +3541,4 @@ struct tb *tb_probe(struct tb_nhi *nhi)
 
 	return tb;
 }
-EXPORT_SYMBOL_FOR_MODULES(tb_probe, "thunderbolt_apple");
+EXPORT_SYMBOL_NS_GPL(tb_probe, "USB4");

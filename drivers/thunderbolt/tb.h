@@ -798,7 +798,6 @@ int tb_domain_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 				       int transmit_path, int transmit_ring,
 				       int receive_path, int receive_ring);
 int tb_domain_disconnect_all_paths(struct tb *tb);
-int tb_domain_unregister_unplugged_xdomains(struct tb *tb);
 
 static inline struct tb *tb_domain_get(struct tb *tb)
 {
@@ -1130,6 +1129,28 @@ tb_port_path_direction_downstream(const struct tb_port *src,
 	return src->sw->config.depth < dst->sw->config.depth;
 }
 
+/*
+ * DP IN adapter of an Apple silicon host router (its NHI glue wants DP tunnel
+ * notifications). These need a few extra steps compared to other hosts.
+ */
+static inline bool tb_port_is_apple_host_dpin(const struct tb_port *port)
+{
+	const struct tb *tb = port->sw->tb;
+
+	/* the KUnit tests build switches without a domain */
+	if (!tb || !tb->nhi || tb_route(port->sw) || !tb_port_is_dpin(port))
+		return false;
+	return tb->nhi->ops && tb->nhi->ops->dp_tunnel_changed;
+}
+
+static inline bool tb_port_needs_host_dp_credits(const struct tb_port *port)
+{
+	const struct tb *tb = port->sw->tb;
+
+	return tb && tb->nhi && !tb_route(port->sw) && tb_port_is_dpin(port) &&
+	       (tb->nhi->quirks & QUIRK_HOST_DP_NFC_CREDITS);
+}
+
 static inline bool tb_port_use_credit_allocation(const struct tb_port *port)
 {
 	return tb_port_is_null(port) && port->sw->credit_allocation;
@@ -1269,7 +1290,6 @@ struct tb_xdomain *tb_xdomain_alloc(struct tb *tb, struct device *parent,
 				    const uuid_t *remote_uuid);
 void tb_xdomain_add(struct tb_xdomain *xd);
 void tb_xdomain_remove(struct tb_xdomain *xd);
-void tb_xdomain_unregister(struct tb_xdomain *xd);
 struct tb_xdomain *tb_xdomain_find_by_link_depth(struct tb *tb, u8 link,
 						 u8 depth);
 
@@ -1462,6 +1482,8 @@ int usb4_port_retimer_nvm_read(struct tb_port *port, u8 index,
 			       unsigned int address, void *buf, size_t size);
 
 int usb4_usb3_port_max_link_rate(struct tb_port *port);
+int usb4_usb3_port_consumed_bandwidth(struct tb_port *port, int *upstream_bw,
+				      int *downstream_bw);
 int usb4_usb3_port_allocated_bandwidth(struct tb_port *port, int *upstream_bw,
 				       int *downstream_bw);
 int usb4_usb3_port_allocate_bandwidth(struct tb_port *port, int *upstream_bw,
@@ -1486,7 +1508,6 @@ int usb4_dp_port_allocate_bandwidth(struct tb_port *port, int bw);
 int usb4_dp_port_requested_bandwidth(struct tb_port *port);
 
 int usb4_pci_port_set_ext_encapsulation(struct tb_port *port, bool enable);
-int usb4_pci_port_ltssm_state(struct tb_port *port);
 
 static inline bool tb_is_usb4_port_device(const struct device *dev)
 {
@@ -1562,14 +1583,6 @@ static inline void tb_service_debugfs_init(struct tb_service *svc) { }
 static inline void tb_service_debugfs_remove(struct tb_service *svc) { }
 static inline void tb_retimer_debugfs_init(struct tb_retimer *rt) { }
 static inline void tb_retimer_debugfs_remove(struct tb_retimer *rt) { }
-#endif
-
-#if IS_REACHABLE(CONFIG_CONFIGFS_FS)
-int tb_configfs_init(void);
-void tb_configfs_exit(void);
-#else
-static inline int tb_configfs_init(void) { return 0; }
-static inline void tb_configfs_exit(void) { }
 #endif
 
 #endif
