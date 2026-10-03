@@ -222,9 +222,14 @@ static bool apple_pcie_tunnel_dry_run;
  *          on those clocks here, every access after the first would fault.
  *   bit 1  skip every offset the driver did not already know about, leaving
  *          only registers Linux has always written.
+ *   bit 2  apply no tunables. Which window is "fabric" and which is "debug"
+ *          was worked out by analogy with a t8103, which has five windows to
+ *          this SoC's seven, so they may well name the wrong blocks here -
+ *          and every failure so far has had the tunables applied.
  */
 #define VARIANT_KEEP_CLOCKS	BIT(0)
 #define VARIANT_KNOWN_REGS_ONLY	BIT(1)
+#define VARIANT_NO_TUNABLES	BIT(2)
 static unsigned int apple_pcie_tunnel_variant;
 module_param_named(tunnel_variant, apple_pcie_tunnel_variant, uint, 0644);
 MODULE_PARM_DESC(tunnel_variant,
@@ -1321,7 +1326,9 @@ static const struct hw_info t6000_pciec_hw = {
 } while (0)
 
 #define TUNABLE(i) do {							\
-	if (apple_pcie_tunnel_dry_run)					\
+	if (apple_pcie_tunnel_variant & VARIANT_NO_TUNABLES)		\
+		;							\
+	else if (apple_pcie_tunnel_dry_run)				\
 		dev_info(pcie->dev, "DRY tunable %d (%zu entries)\n", (i), \
 			 pcie->tunables[i].values ?			\
 				pcie->tunables[i].values->sz : 0);	\
@@ -1330,7 +1337,9 @@ static const struct hw_info t6000_pciec_hw = {
 } while (0)
 
 #define PORT_TUNABLE() do {						\
-	if (apple_pcie_tunnel_dry_run)					\
+	if (apple_pcie_tunnel_variant & VARIANT_NO_TUNABLES)		\
+		;							\
+	else if (apple_pcie_tunnel_dry_run)				\
 		dev_info(pcie->dev, "DRY port tunable\n");		\
 	else								\
 		apple_pcie_tunable_apply(&port->tunable);		\
