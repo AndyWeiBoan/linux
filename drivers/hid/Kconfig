@@ -135,6 +135,18 @@ config HID_ACRUX_FF
 	Say Y here if you want to enable force feedback support for ACRUX
 	game controllers.
 
+config HID_APPLE_DISPLAY
+	tristate "Apple displays with HID backlight control"
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	Backlight control for Apple displays that expose it over HID,
+	such as the Studio Display. The display's speakers, microphone,
+	camera and ambient light sensor are handled by generic drivers;
+	only the backlight needs this.
+
+	Say Y here if you want the brightness of such a display to show
+	up under /sys/class/backlight.
+
 config HID_APPLE
 	tristate "Apple {i,Power,Mac}Books"
 	depends on LEDS_CLASS
