@@ -1342,8 +1342,7 @@ static void apple_pcie_tunnel_port_init(struct apple_pcie *pcie,
 
 	/* Put back the MSI configuration the reset above cleared. */
 	tw(PORT_INTSTAT, ~0);
-	writel_relaxed(lower_32_bits(DOORBELL_ADDR),
-		       port->base + pcie->hw->port_msiaddr);
+	tw(pcie->hw->port_msiaddr, lower_32_bits(DOORBELL_ADDR));
 	tw(PORT_MSIBASE, 0);
 	tw(PORT_MSICFG, (ilog2(pcie->nvecs) << PORT_MSICFG_L2MSINUM_SHIFT) |
 		       PORT_MSICFG_EN);
