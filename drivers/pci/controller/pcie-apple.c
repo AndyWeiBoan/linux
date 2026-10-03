@@ -264,6 +264,8 @@ static bool apple_pcie_tunnel_dry_run;
  * clock, which may be exactly why the firmware leaves this clear here.
  */
 #define VARIANT_REFCLK		BIT(5)
+/* bit 6: 0x4020 = 3 on its own, split from the port's tunable. */
+#define VARIANT_ARM		BIT(6)
 
 /*
  * Read back the offsets the transcript writes, on whichever controller, to
@@ -1487,13 +1489,14 @@ static void apple_pcie_tunnel_port_init(struct apple_pcie *pcie,
 	apple_pcie_tunnel_dry_run =
 		apple_pcie_tunnel_dry & (start_link ? DRY_TUNNEL : DRY_PROBE);
 
-	if (apple_pcie_tunnel_variant & (VARIANT_MINIMAL | VARIANT_REFCLK)) {
+	if (apple_pcie_tunnel_variant &
+	    (VARIANT_MINIMAL | VARIANT_REFCLK | VARIANT_ARM)) {
 		if (apple_pcie_tunnel_variant & VARIANT_REFCLK)
 			tset(PORT_REFCLK_EN, PORT_REFCLK);
-		if (apple_pcie_tunnel_variant & VARIANT_MINIMAL) {
+		if (apple_pcie_tunnel_variant & VARIANT_MINIMAL)
 			PORT_TUNABLE();		/* 0x140 bit 0 */
+		if (apple_pcie_tunnel_variant & VARIANT_ARM)
 			tw(PORT_TUNNEL_ARM, 0x3);
-		}
 
 		if (start_link) {
 			reinit_completion(&pcie->event);
