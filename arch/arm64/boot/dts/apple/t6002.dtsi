@@ -266,6 +266,7 @@
 &die0 {
 	#include "t600x-die0.dtsi"
 	#include "t600x-dieX.dtsi"
+	#include "t600x-pciec.dtsi"
 };
 
 #include "t600x-pmgr.dtsi"

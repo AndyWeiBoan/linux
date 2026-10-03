@@ -486,6 +486,14 @@
 		 * own device tree. Whatever arrives over a tunnel here has to be
 		 * routed through that port's display crossbar. */
 		apple,atc-index = <0>;
+		/*
+		 * The PCIe-C root complex this port's tunnels land on. Its
+		 * nodes are populated when this controller starts, not at
+		 * boot, so without this phandle they never appear at all.
+		 */
+#if DIE_NO == 0
+		apple,pcie-tunnel = <&usb4_0_pcie_tunnel>;
+#endif
 		reg = <0x7 0x01ac0000 0x0 0xc000>,
 			<0x7 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -654,6 +662,14 @@
 		 * own device tree. Whatever arrives over a tunnel here has to be
 		 * routed through that port's display crossbar. */
 		apple,atc-index = <1>;
+		/*
+		 * The PCIe-C root complex this port's tunnels land on. Its
+		 * nodes are populated when this controller starts, not at
+		 * boot, so without this phandle they never appear at all.
+		 */
+#if DIE_NO == 0
+		apple,pcie-tunnel = <&usb4_1_pcie_tunnel>;
+#endif
 		reg = <0xb 0x01ac0000 0x0 0xc000>,
 			<0xb 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -829,6 +845,14 @@
 		 * own device tree. Whatever arrives over a tunnel here has to be
 		 * routed through that port's display crossbar. */
 		apple,atc-index = <2>;
+		/*
+		 * The PCIe-C root complex this port's tunnels land on. Its
+		 * nodes are populated when this controller starts, not at
+		 * boot, so without this phandle they never appear at all.
+		 */
+#if DIE_NO == 0
+		apple,pcie-tunnel = <&usb4_2_pcie_tunnel>;
+#endif
 		reg = <0xf 0x01ac0000 0x0 0xc000>,
 			<0xf 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
@@ -996,6 +1020,14 @@
 		 * own device tree. Whatever arrives over a tunnel here has to be
 		 * routed through that port's display crossbar. */
 		apple,atc-index = <3>;
+		/*
+		 * The PCIe-C root complex this port's tunnels land on. Its
+		 * nodes are populated when this controller starts, not at
+		 * boot, so without this phandle they never appear at all.
+		 */
+#if DIE_NO == 0
+		apple,pcie-tunnel = <&usb4_3_pcie_tunnel>;
+#endif
 		reg = <0x13 0x01ac0000 0x0 0xc000>,
 			<0x13 0x01080000 0x0 0x20000>;
 		reg-names = "rc", "sram";
