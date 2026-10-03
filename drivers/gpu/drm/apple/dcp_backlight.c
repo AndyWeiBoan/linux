@@ -91,6 +91,27 @@ static int dcp_get_brightness(struct backlight_device *bd)
 
 #define SCALE_FACTOR (1 << 10)
 
+#define EXT_MIN_NITS	4
+#define EXT_MAX_NITS	600
+
+static u32 interpolate_u16(int val, int min, int max, const u16 *tbl,
+			   size_t tbl_size)
+{
+	u32 frac;
+	u64 low, high;
+	u32 interpolated = (tbl_size - 1) * ((val - min) * SCALE_FACTOR) / (max - min);
+	size_t index = interpolated / SCALE_FACTOR;
+
+	if (index + 1 >= tbl_size)
+		return tbl[tbl_size - 1];
+
+	frac = interpolated & (SCALE_FACTOR - 1);
+	low = tbl[index];
+	high = tbl[index + 1];
+
+	return ((frac * high) + ((SCALE_FACTOR - frac) * low)) / SCALE_FACTOR;
+}
+
 static u32 interpolate(int val, int min, int max, u32 *tbl, size_t tbl_size)
 {
 	u32 frac;
@@ -109,9 +130,72 @@ static u32 interpolate(int val, int min, int max, u32 *tbl, size_t tbl_size)
 	return ((frac * high) + ((SCALE_FACTOR - frac) * low)) / SCALE_FACTOR;
 }
 
+unsigned int ext_bl_max_nits = 600;
+module_param(ext_bl_max_nits, uint, 0644);
+/*
+ * External Apple DisplayPort panels (Studio Display) take the same IOMFB swap
+ * field as the built-in panel: a 16 bit PWM-ish code in the upper half, not
+ * nits.  The built-in panel's own table pins the shape of that curve --
+ * 2 nits is 0x1000 and 510 nits is 0x7fe0, i.e. nits scales as code^(8/3).
+ *
+ * This table is that curve stretched to the Studio Display's 4..600 nits,
+ * 65 entries evenly spaced in nits.  Verified on hardware: entry ~18
+ * (0x4800) reads as a comfortable dark-room level and ~0x6c00 as a normal
+ * daytime level, matching the 134 and 386 nits the curve predicts.
+ */
+static const u16 ext_brightness_code[] = {
+	0x1388, 0x1ea9, 0x2568, 0x2a92, 0x2edb, 0x3293, 0x35e2, 0x38e2,
+	0x3ba4, 0x3e34, 0x4099, 0x42db, 0x44fe, 0x4706, 0x48f6, 0x4ad2,
+	0x4c9a, 0x4e51, 0x4ff9, 0x5193, 0x5320, 0x54a0, 0x5616, 0x5782,
+	0x58e4, 0x5a3c, 0x5b8d, 0x5cd6, 0x5e17, 0x5f51, 0x6085, 0x61b2,
+	0x62da, 0x63fc, 0x6518, 0x6630, 0x6742, 0x6850, 0x6959, 0x6a5e,
+	0x6b5f, 0x6c5c, 0x6d55, 0x6e4b, 0x6f3d, 0x702c, 0x7117, 0x71ff,
+	0x72e5, 0x73c7, 0x74a6, 0x7583, 0x765d, 0x7735, 0x780a, 0x78dc,
+	0x79ac, 0x7a7a, 0x7b46, 0x7c0f, 0x7cd7, 0x7d9c, 0x7e5f, 0x7f21,
+	0x7fe0,
+};
+
+unsigned int ext_bl_raw_max;
+module_param(ext_bl_raw_max, uint, 0444);
+MODULE_PARM_DESC(ext_bl_raw_max,
+		 "if set, external panel brightness is the raw IOMFB bl_value "
+		 "and this is its maximum (calibration mode)");
+bool ext_bl_service = false;
+module_param(ext_bl_service, bool, 0444);
+MODULE_PARM_DESC(ext_bl_service,
+		 "tell DCP to create a backlight service for external panels "
+		 "(set at module load, e.g. appledrm.ext_bl_service=1)");
+bool ext_bl_force_register = true;
+module_param(ext_bl_force_register, bool, 0644);
+MODULE_PARM_DESC(ext_bl_force_register,
+		 "register a backlight for external DCP panels on hotplug");
+MODULE_PARM_DESC(ext_bl_max_nits,
+		 "max brightness in nits reported for external DCP panels");
+
 static u32 calculate_dac(struct apple_dcp *dcp, int val)
 {
 	u32 dac;
+
+	/*
+	 * macOS reports an external panel's brightness as nits in 16.16 fixed
+	 * point (IOMFBBrightnessLevel = nits * 65536), but that is *not* what
+	 * the swap's bl_value takes -- feeding it nits << 16 lands an order of
+	 * magnitude below the panel's minimum and the screen stays black.
+	 * bl_value is the same 16 bit code as the built-in panel, in the upper
+	 * half of the word, so map nits onto that curve instead.
+	 */
+	if (dcp->brightness.external) {
+		u32 code;
+
+		if (ext_bl_raw_max)
+			return (u32)val;
+
+		code = interpolate_u16(clamp(val, EXT_MIN_NITS, EXT_MAX_NITS),
+				   EXT_MIN_NITS, EXT_MAX_NITS,
+				   ext_brightness_code,
+				   ARRAY_SIZE(ext_brightness_code));
+		return code << 16;
+	}
 
 	if (val <= MIN_BRIGHTNESS_PART1)
 		return 16 * brightness_part1[0];
@@ -226,7 +310,12 @@ static int dcp_set_brightness(struct backlight_device *bd)
 	drm_modeset_drop_locks(&ctx);
 	drm_modeset_acquire_fini(&ctx);
 
-	return dcp_backlight_update(dcp);
+	ret = dcp_backlight_update(dcp);
+	dev_info(dcp->dev,
+		 "set_brightness: %d nits -> dac 0x%x, mode_valid %d, update %d, ret %d\n",
+		 brightness, dcp->brightness.dac,
+		 READ_ONCE(dcp->mode_state.valid), dcp->brightness.update, ret);
+	return ret;
 }
 
 static const struct backlight_ops dcp_backlight_ops = {
@@ -244,15 +333,37 @@ int dcp_backlight_register(struct apple_dcp *dcp)
 		.brightness = dcp->brightness.nits,
 		.scale = BACKLIGHT_SCALE_LINEAR,
 	};
-	props.max_brightness = min(dcp->brightness.maximum, MAX_BRIGHTNESS_PART2 - 1);
+	const char *name = "apple-panel-bl";
+	char ext_name[32];
 
-	bl_dev = devm_backlight_device_register(dev, "apple-panel-bl", dev, dcp,
+	if (dcp->brightness.external) {
+		props.max_brightness = ext_bl_raw_max ? ext_bl_raw_max
+						      : EXT_MAX_NITS;
+		/*
+		 * A machine has one DCP per external output, so the name has
+		 * to carry the device name to stay unique.
+		 */
+		snprintf(ext_name, sizeof(ext_name), "apple-dp-bl-%.12s",
+			 dcp->brightness.conn_name[0] ?
+				 dcp->brightness.conn_name : dev_name(dev));
+		name = ext_name;
+	} else {
+		props.max_brightness = min(dcp->brightness.maximum,
+					   MAX_BRIGHTNESS_PART2 - 1);
+	}
+
+	bl_dev = devm_backlight_device_register(dev, name, dev, dcp,
 						&dcp_backlight_ops, &props);
 	if (IS_ERR(bl_dev))
 		return PTR_ERR(bl_dev);
 
 	dcp->brightness.bl_dev = bl_dev;
 	dcp->brightness.dac = calculate_dac(dcp, dcp->brightness.nits);
+
+	dev_info(dev, "backlight '%s' registered: %d of %d nits%s (dac 0x%x)\n",
+		 name, dcp->brightness.nits, props.max_brightness,
+		 dcp->brightness.external ? " [external/DP]" : "",
+		 dcp->brightness.dac);
 
 	return 0;
 }

@@ -190,11 +190,15 @@ static bool iomfbep_cb_match_backlight_service(struct apple_dcp *dcp, int tag, v
 {
 	trace_iomfb_callback(dcp, tag, __func__);
 
-	if (!dcp_has_panel(dcp)) {
+	if (!dcp_has_panel(dcp) &&
+	    !(dcp->brightness.external && ext_bl_service)) {
 		u8 *succ = out;
 		*succ = true;
 		return true;
 	}
+
+	if (dcp->brightness.external)
+		dev_info(dcp->dev, "match_backlight_service [external/DP]\n");
 
 	iomfb_a132_backlight_service_matched(dcp, false, complete_backlight_service_matched, out);
 
@@ -207,7 +211,15 @@ static void iomfb_cb_pr_publish(struct apple_dcp *dcp, struct iomfb_property *pr
 	switch (prop->id) {
 	case IOMFB_PROPERTY_NITS:
 	{
-		if (dcp_has_panel(dcp)) {
+		/*
+		 * External DisplayPort panels (Studio Display) publish this
+		 * too; macOS drives their brightness over the same path.
+		 */
+		if (dcp_has_panel(dcp) || dcp->brightness.external) {
+			dev_info_once(dcp->dev,
+				      "IOMFB publishes nits: raw %u scale %d%s\n",
+				      prop->value, dcp->brightness.scale,
+				      dcp->brightness.external ? " [external/DP]" : "");
 			dcp->brightness.nits = prop->value / dcp->brightness.scale;
 			/* notify backlight device of the initial brightness */
 			if (!dcp->brightness.bl_dev && dcp->brightness.maximum > 0)
@@ -1110,7 +1122,13 @@ dcpep_cb_get_tiling_state(struct apple_dcp *dcp,
 
 static u8 dcpep_cb_create_backlight_service(struct apple_dcp *dcp)
 {
-	return dcp_has_panel(dcp);
+	bool want = dcp_has_panel(dcp) ||
+		    (dcp->brightness.external && ext_bl_service);
+
+	if (dcp->brightness.external)
+		dev_info(dcp->dev, "create_backlight_service -> %d [external/DP]\n",
+			 want);
+	return want;
 }
 
 TRAMPOLINE_VOID(trampoline_nop, dcpep_cb_nop);
@@ -1480,12 +1498,23 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
 	/* These fields should be set together */
 	req->swap.swap_completed = req->swap.swap_enabled;
 
-	/* update brightness if changed */
-	if (dcp_has_panel(dcp) && dcp->brightness.update) {
+	/*
+	 * Update brightness if changed.  For external panels only once a
+	 * backlight device exists and userspace has actually asked for a
+	 * level: bl_value 0 means "backlight off" and DCP callbacks such as
+	 * enable_backlight_message_ap_gated set ->update on their own.
+	 */
+	if ((dcp_has_panel(dcp) ||
+	     (dcp->brightness.external && dcp->brightness.bl_dev &&
+	      dcp->brightness.dac)) &&
+	    dcp->brightness.update) {
 		req->swap.bl_unk = 1;
 		req->swap.bl_value = dcp->brightness.dac;
 		req->swap.bl_power = 0x40;
 		dcp->brightness.update = false;
+		dev_info(dcp->dev, "swap carries bl_value 0x%x%s\n",
+			 req->swap.bl_value,
+			 dcp->brightness.external ? " [external/DP]" : "");
 	}
 
 	if (crtc_state->color_mgmt_changed) {

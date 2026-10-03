@@ -2958,10 +2958,23 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
 		of_node_put(panel_np);
 		dcp->fixed_connector_type = DRM_MODE_CONNECTOR_eDP;
 		dcp->connector_type = DRM_MODE_CONNECTOR_eDP;
-		INIT_WORK(&dcp->bl_register_wq, dcp_work_register_backlight);
-		mutex_init(&dcp->bl_register_mutex);
-		INIT_WORK(&dcp->bl_update_wq, dcp_work_update_backlight);
 	}
+
+	/*
+	 * No "apple,panel" node means this DCP drives an external DisplayPort
+	 * output.  macOS controls the brightness of Apple's own DP panels
+	 * (Studio Display, Pro Display XDR) through the same IOMFB swap field
+	 * as the built-in panel, only the units differ: nits in 16.16 fixed
+	 * point instead of a panel specific iDAC code.
+	 */
+	if (!dcp_has_panel(dcp)) {
+		dcp->brightness.external = true;
+		dcp->brightness.maximum = ext_bl_max_nits;
+	}
+
+	INIT_WORK(&dcp->bl_register_wq, dcp_work_register_backlight);
+	mutex_init(&dcp->bl_register_mutex);
+	INIT_WORK(&dcp->bl_update_wq, dcp_work_update_backlight);
 
 	ret = dcp_create_piodma_iommu_dev(dcp);
 	if (ret || !dcp->iommu_dom)
@@ -3060,10 +3073,8 @@ static void dcp_comp_unbind(struct device *dev, struct device *main, void *data)
 		dcp->piodma = NULL;
 	}
 
-	if (dcp->connector_type == DRM_MODE_CONNECTOR_eDP) {
-		cancel_work_sync(&dcp->bl_register_wq);
-		cancel_work_sync(&dcp->bl_update_wq);
-	}
+	cancel_work_sync(&dcp->bl_register_wq);
+	cancel_work_sync(&dcp->bl_update_wq);
 	cancel_delayed_work_sync(&dcp->swap_watchdog_wq);
 	cancel_work_sync(&dcp->vblank_wq);
 

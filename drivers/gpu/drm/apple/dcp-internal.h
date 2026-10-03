@@ -124,6 +124,16 @@ struct dcp_brightness {
 	int nits;
 	int scale;
 	bool update;
+	/*
+	 * External (DisplayPort) panels such as the Apple Studio Display have
+	 * no "apple,panel" DT node, so dcp_has_panel() is false for them.
+	 * macOS drives their brightness through the very same IOMFB path as
+	 * the built-in panel, except the value is nits in 16.16 fixed point
+	 * rather than a panel specific iDAC code.
+	 */
+	bool external;
+	/* DRM connector name, so userspace can match the backlight to a monitor */
+	char conn_name[16];
 };
 
 struct audiosrv_data;
@@ -342,6 +352,11 @@ struct apple_dcp {
 
 void dcp_drm_crtc_page_flip(struct apple_dcp *dcp, ktime_t now);
 void dcp_handle_hotplug_actions(struct apple_dcp *dcp, unsigned int action);
+
+extern unsigned int ext_bl_max_nits;
+extern bool ext_bl_force_register;
+extern bool ext_bl_service;
+extern unsigned int ext_bl_raw_max;
 
 int dcp_backlight_register(struct apple_dcp *dcp);
 int dcp_backlight_update(struct apple_dcp *dcp);
