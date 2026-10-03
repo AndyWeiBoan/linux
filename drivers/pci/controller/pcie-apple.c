@@ -256,6 +256,14 @@ static bool apple_pcie_tunnel_dry_run;
  * sets it.
  */
 #define VARIANT_MINIMAL		BIT(4)
+/*
+ * bit 5: also set PORT_REFCLK_EN. Split out because it is the one of the three
+ * whose effect is not just a register value: apple_pcie_setup_refclk() asks
+ * the PHY for the clock and waits for an acknowledgement before setting this,
+ * and a tunnelled port has no PHY of its own to ask - the ATC PHY supplies the
+ * clock, which may be exactly why the firmware leaves this clear here.
+ */
+#define VARIANT_REFCLK		BIT(5)
 
 /*
  * Read back the offsets the transcript writes, on whichever controller, to
@@ -1479,10 +1487,13 @@ static void apple_pcie_tunnel_port_init(struct apple_pcie *pcie,
 	apple_pcie_tunnel_dry_run =
 		apple_pcie_tunnel_dry & (start_link ? DRY_TUNNEL : DRY_PROBE);
 
-	if (apple_pcie_tunnel_variant & VARIANT_MINIMAL) {
-		tset(PORT_REFCLK_EN, PORT_REFCLK);
-		PORT_TUNABLE();			/* 0x140 bit 0 */
-		tw(PORT_TUNNEL_ARM, 0x3);
+	if (apple_pcie_tunnel_variant & (VARIANT_MINIMAL | VARIANT_REFCLK)) {
+		if (apple_pcie_tunnel_variant & VARIANT_REFCLK)
+			tset(PORT_REFCLK_EN, PORT_REFCLK);
+		if (apple_pcie_tunnel_variant & VARIANT_MINIMAL) {
+			PORT_TUNABLE();		/* 0x140 bit 0 */
+			tw(PORT_TUNNEL_ARM, 0x3);
+		}
 
 		if (start_link) {
 			reinit_completion(&pcie->event);
