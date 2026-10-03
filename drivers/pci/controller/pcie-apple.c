@@ -221,6 +221,22 @@ static const struct hw_info t602x_hw = {
 	.max_rid2sid		= 512,
 };
 
+static const struct {
+	const char *name;
+	const char *reg_name;
+} apple_pcie_tunables[] = {
+	{ "apple,tunable-debug",  "debug"  },
+	{ "apple,tunable-fabric", "fabric" },
+	/*
+	 * Deliberately not "apple,tunable-rc". m1n1 hands it to us, but in a
+	 * full trace of macOS - boot and a hotplug - the rc window is not
+	 * touched once, while fabric and debug are written repeatedly. It is
+	 * presumably programmed earlier, by iBoot. Writing it from here takes
+	 * an asynchronous SError a moment later, so the window is not ours to
+	 * touch at this point.
+	 */
+};
+
 /* A parsed tunable together with the window it is applied to. */
 struct apple_pcie_tunable {
 	struct apple_tunable *values;
@@ -237,7 +253,7 @@ struct apple_pcie {
 	struct completion	event;
 	struct irq_fwspec	fwspec;
 	u32			nvecs;
-	struct apple_pcie_tunable tunables[3];
+	struct apple_pcie_tunable tunables[ARRAY_SIZE(apple_pcie_tunables)];
 };
 
 /*
@@ -245,15 +261,6 @@ struct apple_pcie {
  * before anything tries to train a link. @name is the tunable property;
  * @reg_name is the register window it goes to, which the device tree names.
  */
-static const struct {
-	const char *name;
-	const char *reg_name;
-} apple_pcie_tunables[] = {
-	{ "apple,tunable-debug",  "debug"  },
-	{ "apple,tunable-fabric", "fabric" },
-	{ "apple,tunable-rc",     "rc"     },
-};
-
 static void apple_pcie_tunable_apply(const struct apple_pcie_tunable *t)
 {
 	if (t->values && t->regs)
@@ -1236,8 +1243,8 @@ int apple_pcie_tunnel_up(struct platform_device *pdev)
 		 readl_relaxed(port->base + PORT_LINKSTS));
 
 	/* The two tunables macOS re-applies on every plug; "rc" it does not. */
-	apple_pcie_tunable_apply(&pcie->tunables[0]);	/* debug */
-	apple_pcie_tunable_apply(&pcie->tunables[1]);	/* fabric */
+	for (int i = 0; i < ARRAY_SIZE(pcie->tunables); i++)
+		apple_pcie_tunable_apply(&pcie->tunables[i]);
 
 	/* Take the port down. */
 	writel_relaxed(0x110, port->base + PORT_TUNNEL_PRE_RESET);
