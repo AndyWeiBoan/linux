@@ -266,6 +266,17 @@ static bool apple_pcie_tunnel_dry_run;
 #define VARIANT_REFCLK		BIT(5)
 /* bit 6: 0x4020 = 3 on its own, split from the port's tunable. */
 #define VARIANT_ARM		BIT(6)
+/*
+ * bit 7: write the port's own tunable inside a reset window.
+ *
+ * 0x140 is the last known difference from the internal controller, whose link
+ * is up: it reads 0x11 there and 0x10 here, and the tunable is the bit. Writing
+ * it on a running port is an SError, and both m1n1 and macOS write it with the
+ * port held in reset - m1n1 before it ever enables APPCLK, macOS after
+ * explicitly dropping it. So drop the clock, assert reset, write it, and put
+ * both back.
+ */
+#define VARIANT_TUNABLE_IN_RESET	BIT(7)
 
 /*
  * Read back the offsets the transcript writes, on whichever controller, to
@@ -1497,6 +1508,13 @@ static void apple_pcie_tunnel_port_init(struct apple_pcie *pcie,
 			PORT_TUNABLE();		/* 0x140 bit 0 */
 		if (apple_pcie_tunnel_variant & VARIANT_ARM)
 			tw(PORT_TUNNEL_ARM, 0x3);
+		if (apple_pcie_tunnel_variant & VARIANT_TUNABLE_IN_RESET) {
+			tclr(PORT_APPCLK_EN, PORT_APPCLK);
+			tclr(PORT_PERST_OFF, pcie->hw->port_perst);
+			PORT_TUNABLE();
+			tset(PORT_PERST_OFF, pcie->hw->port_perst);
+			tset(PORT_APPCLK_EN, PORT_APPCLK);
+		}
 
 		if (start_link) {
 			reinit_completion(&pcie->event);
