@@ -181,6 +181,16 @@ MODULE_PARM_DESC(link_up_timeout, "PCIe link training timeout in milliseconds");
  * is safe and the steps can be switched on one at a time at runtime rather
  * than one reboot per guess.
  */
+/*
+ * Arm link training at probe, the way every other port here works. macOS does
+ * not, but it is the one thing about the port's state that changed between a
+ * plug that worked and a plug that kills the machine, so keep it switchable.
+ */
+static bool apple_pcie_tunnel_arm_at_probe = true;
+module_param_named(tunnel_arm_at_probe, apple_pcie_tunnel_arm_at_probe, bool, 0444);
+MODULE_PARM_DESC(tunnel_arm_at_probe,
+		 "Arm link training on a tunnelled port at probe");
+
 static unsigned int apple_pcie_tunnel_steps;
 module_param_named(tunnel_steps, apple_pcie_tunnel_steps, uint, 0644);
 MODULE_PARM_DESC(tunnel_steps,
@@ -905,14 +915,14 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 	link_stat = readl_relaxed(port->base + PORT_LINKSTS);
 	if (!(link_stat & PORT_LINKSTS_UP) && pcie->hw->tunnelled) {
 		/*
-		 * Leave the link alone. Nothing is going to answer until a
-		 * cable is plugged in and a tunnel is built, and macOS does
-		 * not arm training early either: it takes the port down and
-		 * brings it back when the tunnel arrives, starting training
-		 * last. apple_pcie_tunnel_up() does the same. Starting it here
-		 * only delays the boot and leaves the link in a state that
-		 * never comes up.
+		 * Arm training but do not wait: nothing will answer until a
+		 * cable is plugged in and a tunnel is built, which is minutes
+		 * away, and waiting link_up_timeout per controller only delays
+		 * the boot.
 		 */
+		if (apple_pcie_tunnel_arm_at_probe)
+			writel_relaxed(PORT_LTSSMCTL_START,
+				       port->base + PORT_LTSSMCTL);
 	} else if (!(link_stat & PORT_LINKSTS_UP)) {
 		unsigned long timeout, left;
 		/* start link training */
