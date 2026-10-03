@@ -267,10 +267,16 @@ static void apple_pcie_tunable_apply(const struct apple_pcie_tunable *t)
 		apple_tunable_apply(t->regs, t->values);
 }
 
+/*
+ * @apply: whether to write it now. The port's own tunable must not be: macOS
+ * only ever writes that register as part of bringing a tunnel up, with the
+ * port held in reset and its clocks off, and writing it at probe takes an
+ * asynchronous SError.
+ */
 static int apple_pcie_load_tunable(struct platform_device *pdev,
 				   struct device_node *np,
 				   const char *prop, const char *reg_name,
-				   struct apple_pcie_tunable *out)
+				   struct apple_pcie_tunable *out, bool apply)
 {
 	struct device *dev = &pdev->dev;
 	struct apple_tunable *tunable;
@@ -301,9 +307,10 @@ static int apple_pcie_load_tunable(struct platform_device *pdev,
 
 	out->values = tunable;
 	out->regs = regs;
-	apple_pcie_tunable_apply(out);
-	dev_info(dev, "applied %s (%zu entries) to %s\n", prop, tunable->sz,
-		 reg_name);
+	if (apply)
+		apple_pcie_tunable_apply(out);
+	dev_info(dev, "%s %s (%zu entries) for %s\n",
+		 apply ? "applied" : "loaded", prop, tunable->sz, reg_name);
 
 	return 0;
 }
@@ -826,7 +833,7 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 	if (pcie->hw->tunnelled) {
 		snprintf(name, sizeof(name), "port%d", port->idx);
 		ret = apple_pcie_load_tunable(platform, np, "apple,tunable",
-					      name, &port->tunable);
+					      name, &port->tunable, false);
 		if (ret)
 			return ret;
 	}
@@ -1167,7 +1174,7 @@ static int apple_pcie_probe(struct platform_device *pdev)
 			ret = apple_pcie_load_tunable(pdev, dev->of_node,
 						apple_pcie_tunables[i].name,
 						apple_pcie_tunables[i].reg_name,
-						&pcie->tunables[i]);
+						&pcie->tunables[i], true);
 			if (ret)
 				return ret;
 		}
