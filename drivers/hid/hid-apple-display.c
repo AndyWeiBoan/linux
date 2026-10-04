@@ -22,8 +22,16 @@
 
 #define USB_DEVICE_ID_APPLE_STUDIO_DISPLAY	0x1114
 
-/* Report ID 2: one 32-bit VESA VCP field, then a 16-bit field we do not use. */
-#define ASD_BRIGHTNESS_REPORT_ID	2
+/* HID monitor page; the application collection the backlight lives under. */
+#define ASD_HID_UP_MONITOR		0x00800000
+#define ASD_HID_MONITOR_CONTROL		(ASD_HID_UP_MONITOR | 0x0001)
+
+/*
+ * The interface that has it carries exactly one feature report, ID 1, seven
+ * bytes including the ID: a 32-bit VESA VCP field holding the level, then a
+ * 16-bit field we do not use.
+ */
+#define ASD_BRIGHTNESS_REPORT_ID	1
 #define ASD_BRIGHTNESS_REPORT_LEN	7
 
 /* Hundredths of a nit, straight out of the report descriptor. */
@@ -45,9 +53,22 @@ static int apple_display_get(struct hid_device *hdev, u32 *level)
 		return -ENOMEM;
 
 	buf[0] = ASD_BRIGHTNESS_REPORT_ID;
+
+	/*
+	 * The display's USB interface is runtime-suspended whenever nobody
+	 * holds it open, and control transfers to a suspended device fail
+	 * with -EHOSTUNREACH.  Take a power reference for the transfer.
+	 */
+	ret = hid_hw_power(hdev, PM_HINT_FULLON);
+	if (ret < 0) {
+		kfree(buf);
+		return ret;
+	}
+
 	ret = hid_hw_raw_request(hdev, ASD_BRIGHTNESS_REPORT_ID, buf,
 				 ASD_BRIGHTNESS_REPORT_LEN, HID_FEATURE_REPORT,
 				 HID_REQ_GET_REPORT);
+	hid_hw_power(hdev, PM_HINT_NORMAL);
 	if (ret == ASD_BRIGHTNESS_REPORT_LEN) {
 		*level = get_unaligned_le32(buf + 1);
 		ret = 0;
@@ -72,9 +93,17 @@ static int apple_display_set(struct hid_device *hdev, u32 level)
 
 	buf[0] = ASD_BRIGHTNESS_REPORT_ID;
 	put_unaligned_le32(level, buf + 1);
+
+	ret = hid_hw_power(hdev, PM_HINT_FULLON);
+	if (ret < 0) {
+		kfree(buf);
+		return ret;
+	}
+
 	ret = hid_hw_raw_request(hdev, ASD_BRIGHTNESS_REPORT_ID, buf,
 				 ASD_BRIGHTNESS_REPORT_LEN, HID_FEATURE_REPORT,
 				 HID_REQ_SET_REPORT);
+	hid_hw_power(hdev, PM_HINT_NORMAL);
 	if (ret == ASD_BRIGHTNESS_REPORT_LEN)
 		ret = 0;
 	else if (ret >= 0)
@@ -115,6 +144,7 @@ static int apple_display_probe(struct hid_device *hdev,
 {
 	struct backlight_properties props = {};
 	struct apple_display *disp;
+	unsigned int i;
 	u32 level;
 	int ret;
 
@@ -129,6 +159,18 @@ static int apple_display_probe(struct hid_device *hdev,
 	 */
 	if (!hdev->report_enum[HID_FEATURE_REPORT]
 			.report_id_hash[ASD_BRIGHTNESS_REPORT_ID])
+		return -ENODEV;
+
+	/*
+	 * Another of the display's interfaces happens to have a report with
+	 * the same id under one of Apple's vendor pages; asking it for the
+	 * backlight gets -EPIPE. Take only the monitor collection.
+	 */
+	for (i = 0; i < hdev->maxcollection; i++)
+		if (hdev->collection[i].type == HID_COLLECTION_APPLICATION &&
+		    hdev->collection[i].usage == ASD_HID_MONITOR_CONTROL)
+			break;
+	if (i == hdev->maxcollection)
 		return -ENODEV;
 
 	disp = devm_kzalloc(&hdev->dev, sizeof(*disp), GFP_KERNEL);
