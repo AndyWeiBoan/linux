@@ -66,6 +66,18 @@ static int link_up_timeout = 500;
 module_param(link_up_timeout, int, 0644);
 MODULE_PARM_DESC(link_up_timeout, "PCIe link training timeout in milliseconds");
 
+/*
+ * Re-arming asserts PERST and gates the clock on a port that is still live,
+ * which is a write into hardware the fabric may be tunnelling into. Nothing
+ * observed so far says that is unsafe, but this path has produced an
+ * asynchronous SError before, so leave a way to boot without it:
+ * pcie_apple.tunnel_rearm=0.
+ */
+static bool tunnel_rearm = true;
+module_param(tunnel_rearm, bool, 0644);
+MODULE_PARM_DESC(tunnel_rearm,
+		 "Put an already-running PCIe-C port back into reset before cold init (default: true)");
+
 static bool tunnel_kernel_init = true;
 module_param(tunnel_kernel_init, bool, 0444);
 MODULE_PARM_DESC(tunnel_kernel_init,
@@ -925,12 +937,38 @@ static int apple_pcie_tunnel_reinitialize(struct apple_pcie_port *port)
 static int apple_pcie_tunnel_cold_init(struct apple_pcie_port *port)
 {
 	struct apple_pcie *pcie = port->pcie;
-	u32 stat;
+	u32 stat, appclk, perst;
 	int ret;
 
 	stat = apple_pcie_port_readl(port, PORT_STATUS);
 	dev_info(pcie->dev, "port %pOF PCIe-C cold init, status %#x\n",
 		 port->np, stat);
+
+	/*
+	 * The first cable insertion after boot finds the port with its clock
+	 * gated and its downstream reset asserted, which is the state the rest
+	 * of this function is written against. Every later insertion on the
+	 * same port finds it running -- nothing stops it when the cable goes --
+	 * and the tunables below then land on live hardware. The port comes out
+	 * reading 0x81000200 instead of 0xa9000200 and the link never trains,
+	 * which is why only the first plug of each port works and a reboot is
+	 * the only way back (observed 2026-10-05: atc1 plug 1 up, plugs 2-4
+	 * dead, atc0 plug 1 up on the same boot).
+	 *
+	 * Put it back where the first insertion found it before touching
+	 * anything else.
+	 */
+	appclk = apple_pcie_port_readl(port, PORT_APPCLK);
+	perst = apple_pcie_port_readl(port, pcie->hw->port_perst);
+	if (tunnel_rearm &&
+	    ((appclk & PORT_APPCLK_EN) || (perst & PORT_PERST_OFF))) {
+		dev_info(pcie->dev,
+			 "port %pOF cold init: still live (appclk %#x perst %#x), re-arming\n",
+			 port->np, appclk, perst);
+		apple_pcie_port_rmw_clear(port, PORT_PERST_OFF,
+					  pcie->hw->port_perst);
+		apple_pcie_port_rmw_clear(port, PORT_APPCLK_EN, PORT_APPCLK);
+	}
 
 	dev_info(pcie->dev, "port %pOF cold init: debug and fabric tunables\n",
 		 port->np);
