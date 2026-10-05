@@ -115,7 +115,7 @@ apple_connector_detect(struct drm_connector *connector, bool force)
  * supposed to release the CRTC itself; when it does not, nothing else will, so
  * drop the binding here instead of hoping.
  *
- * apple_drm.release_crtc_on_unplug=0 turns this off for a kernel where the
+ * appledrm.release_crtc_on_unplug=0 turns this off for a kernel where the
  * display path misbehaves and the cause has to be narrowed down without a
  * rebuild.
  */
