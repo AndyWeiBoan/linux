@@ -47,6 +47,12 @@ struct apple_connector {
 	/* Workqueue for sending hotplug events to the associated device */
 	struct work_struct hotplug_wq;
 
+	/*
+	 * Dropping this connector's CRTC after its Type-C cable is gone.  Out
+	 * of line because the cable path cannot take the modeset locks.
+	 */
+	struct work_struct release_crtc_wq;
+
 	struct mutex chunk_lock;
 
 	struct dcp_chunks color_elements;
@@ -61,4 +67,6 @@ void apple_connector_debugfs_init(struct drm_connector *connector, struct dentry
 
 void dcp_connector_update_dict(struct apple_connector *connector, const char *key,
 			       struct dcp_chunks *chunks);
+void apple_connector_queue_release_crtc(struct apple_connector *apple_connector);
+
 #endif

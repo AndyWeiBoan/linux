@@ -21,6 +21,7 @@
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_atomic_uapi.h>
 #include <drm/drm_blend.h>
 #include <drm/clients/drm_client_setup.h>
 #include <drm/drm_crtc.h>
@@ -96,6 +97,105 @@ apple_connector_detect(struct drm_connector *connector, bool force)
 
 	return apple_connector->connected ? connector_status_connected :
 						  connector_status_disconnected;
+}
+
+/*
+ * Every Type-C port's connector can be routed to the same pipelines as the
+ * others, so a connector still bound to a CRTC after its cable is gone takes
+ * that CRTC's encoder slot with it.  The next port routed to the same pipeline
+ * then lands in the same crtc_state->encoder_mask, and because DRM gives each
+ * encoder a possible_clones of only itself -- correctly, two ports cannot
+ * drive one pipeline at once -- drm_atomic_check_valid_clones() rejects every
+ * commit userspace makes:
+ *
+ *   crtcNN failed valid clone check for mask 0xc
+ *
+ * The display stays dark until the session restarts, which is what clears the
+ * stale binding today.  Userspace is told the connector went away and is
+ * supposed to release the CRTC itself; when it does not, nothing else will, so
+ * drop the binding here instead of hoping.
+ *
+ * apple_drm.release_crtc_on_unplug=0 turns this off for a kernel where the
+ * display path misbehaves and the cause has to be narrowed down without a
+ * rebuild.
+ */
+static bool release_crtc_on_unplug = true;
+module_param(release_crtc_on_unplug, bool, 0644);
+MODULE_PARM_DESC(release_crtc_on_unplug,
+		 "Drop a Type-C connector's CRTC when its cable is unplugged (default: true)");
+
+static void apple_connector_release_crtc(struct work_struct *work)
+{
+	struct apple_connector *apple_connector =
+		container_of(work, struct apple_connector, release_crtc_wq);
+	struct drm_connector *conn = &apple_connector->base;
+	struct drm_device *dev = conn->dev;
+	struct drm_connector_state *conn_state;
+	struct drm_modeset_acquire_ctx ctx;
+	struct drm_crtc_state *crtc_state;
+	struct drm_atomic_state *state;
+	struct drm_crtc *crtc;
+	int ret;
+
+	DRM_MODESET_LOCK_ALL_BEGIN(dev, ctx, DRM_MODESET_ACQUIRE_INTERRUPTIBLE,
+				   ret);
+
+	state = drm_atomic_state_alloc(dev);
+	if (!state) {
+		ret = -ENOMEM;
+		goto unlock;
+	}
+	state->acquire_ctx = &ctx;
+
+	conn_state = drm_atomic_get_connector_state(state, conn);
+	if (IS_ERR(conn_state)) {
+		ret = PTR_ERR(conn_state);
+		goto put;
+	}
+
+	/* Already free: the common case, and nothing to commit for it. */
+	crtc = conn_state->crtc;
+	if (!crtc) {
+		ret = 0;
+		goto put;
+	}
+
+	crtc_state = drm_atomic_get_crtc_state(state, crtc);
+	if (IS_ERR(crtc_state)) {
+		ret = PTR_ERR(crtc_state);
+		goto put;
+	}
+
+	ret = drm_atomic_set_crtc_for_connector(conn_state, NULL);
+	if (ret)
+		goto put;
+
+	ret = drm_atomic_set_mode_for_crtc(crtc_state, NULL);
+	if (ret)
+		goto put;
+
+	crtc_state->active = false;
+
+	ret = drm_atomic_commit(state);
+	if (!ret)
+		drm_dbg_kms(dev, "[CONNECTOR:%d:%s] released [CRTC:%d:%s]\n",
+			    conn->base.id, conn->name,
+			    crtc->base.id, crtc->name);
+put:
+	drm_atomic_state_put(state);
+unlock:
+	DRM_MODESET_LOCK_ALL_END(dev, ctx, ret);
+
+	if (ret && ret != -EINTR && ret != -ERESTARTSYS)
+		drm_dbg_kms(dev, "[CONNECTOR:%d:%s] could not release its CRTC: %d\n",
+			    conn->base.id, conn->name, ret);
+}
+
+void apple_connector_queue_release_crtc(struct apple_connector *apple_connector)
+{
+	if (!release_crtc_on_unplug || !apple_connector->port_encoder)
+		return;
+	schedule_work(&apple_connector->release_crtc_wq);
 }
 
 static void apple_connector_oob_hotplug(struct drm_connector *connector,
@@ -342,6 +442,7 @@ static int apple_connector_create(struct drm_device *drm,
 	connector->connected = false;
 	connector->dcp = dcp;
 	INIT_WORK(&connector->hotplug_wq, dcp_hotplug);
+	INIT_WORK(&connector->release_crtc_wq, apple_connector_release_crtc);
 
 	ret = drm_connector_attach_encoder(&connector->base, &encoder->base);
 	if (ret)
@@ -485,6 +586,7 @@ static int apple_probe_typec_ports(struct drm_device *drm,
 		connector->connected = false;
 		connector->dcp = NULL;
 		INIT_WORK(&connector->hotplug_wq, dcp_hotplug);
+	INIT_WORK(&connector->release_crtc_wq, apple_connector_release_crtc);
 
 		for (i = 0; i < num_dcp; i++) {
 			if (!dcp_typec_port_has_candidate(port_idx, dcp[i]))
