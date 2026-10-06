@@ -227,6 +227,42 @@ static int apple_pmgr_reset_xlate(struct reset_controller_dev *rcdev,
 	return 0;
 }
 
+/*
+ * Some domains are marked apple,always-on for reasons that no longer hold, or
+ * that were never written down: T600x keeps atc*_pcie on with no comment at
+ * all, and that in turn pins atc*_common, so four Type-C ports hold eight
+ * domains up through every suspend. Whether any of them can be released is a
+ * question only the hardware answers, and answering it should not need a
+ * device-tree rebuild -- /boot/dtb is shared by every installed kernel, so a
+ * bad one takes all of them down with no way back except a boot from macOS.
+ *
+ * apple_pmgr_pwrstate.ignore_always_on=atc0_pcie,atc1_pcie,... drops the flag
+ * for the domains named, and nothing else changes. Empty by default, so a
+ * normal boot is bit-for-bit what it was.
+ */
+static char *ignore_always_on;
+module_param(ignore_always_on, charp, 0444);
+MODULE_PARM_DESC(ignore_always_on,
+		 "Comma-separated power domain labels whose apple,always-on is ignored");
+
+static bool apple_pmgr_ps_always_on_ignored(const char *name)
+{
+	const char *p = ignore_always_on;
+	size_t len = strlen(name);
+
+	while (p && *p) {
+		const char *end = strchr(p, ',');
+		size_t n = end ? (size_t)(end - p) : strlen(p);
+
+		if (n == len && !strncmp(p, name, n))
+			return true;
+		if (!end)
+			break;
+		p = end + 1;
+	}
+	return false;
+}
+
 static int apple_pmgr_ps_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -281,7 +317,8 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 		ps->externally_clocked = true;
 
 	active = apple_pmgr_ps_is_active(ps);
-	if (of_property_read_bool(node, "apple,always-on")) {
+	if (of_property_read_bool(node, "apple,always-on") &&
+	    !apple_pmgr_ps_always_on_ignored(name)) {
 		ps->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
 		if (!active) {
 			dev_warn(dev, "always-on domain %s is not on at boot\n", name);
