@@ -9,6 +9,9 @@
 上游 Asahi Linux 官方目前不支援 Thunderbolt，也因此不支援任何
 Thunderbolt 螢幕。這個分支把缺的那幾塊補起來。
 
+> ⚠️ **這份工作是人與 AI agent 協作完成的，不適合送往上游。**
+> 詳見下方「[開發方式](#開發方式)」。
+
 ---
 
 ## 硬體範圍
@@ -103,6 +106,30 @@ make ARCH=arm64 -j$(nproc) Image.gz modules
 | `appledrm.release_crtc_on_unplug` | `1` | 拔線時釋放 CRTC。關掉就會復現換孔黑屏 |
 | `pcie_apple.tunnel_rearm` | — | 冷啟動前把活著的 PCIe-C 埠放回 reset |
 | `pmgr_pwrstate.ignore_always_on` | — | 逗號分隔的網域名稱，用來做省電實驗 |
+
+---
+
+## 開發方式
+
+**這個 fork 的程式碼是我與 AI agent（Claude）一起寫出來的。**
+
+分工大致是：我負責實機測試、判讀現象、決定方向；agent 負責讀驅動原始碼、
+比對 macOS 的行為、擬修法、寫 patch。所有改動都在這台機器上實際跑過，
+而不是生成完就算數。相關的 commit 帶有 `Co-Authored-By` 標記。
+
+### 這代表什麼
+
+- **不會送往上游。** [Asahi Linux 的 Generative AI Policy](https://asahilinux.org/copyright/)
+  禁止 AI 協助的貢獻。這個分支從一開始就不打算發 PR 給上游，
+  存在的目的是讓我自己的機器能用，順便公開給同樣需要的人。
+- **請自行判斷再使用。** 這些是核心層級的改動，碰到 PCIe、DMA 與電源網域。
+  雖然實測過，但沒有經過上游的審查流程。
+
+### 如果你想把這些東西送上游
+
+那你得**重新獨立產出**，不能直接拿這裡的 patch。
+不過裡面的發現（macOS 的隧道連結訓練順序、Studio Display 的亮度走 IOMFB
+而非 HID、顯示 CRTC 的釋放時機等）是硬體事實，那部分可以自由參考。
 
 ---
 
