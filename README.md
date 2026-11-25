@@ -60,6 +60,11 @@ HID report 只是個鏡子，會回報數值但改不動它。
 brcmfmac 的 AWDL 支援，讓 AirDrop 能動。
 包含 action frame 轉送、netdev 生命週期修正，以及韌體 RAM 快照的 vendor op。
 
+這部分是 **Brent Kearney** 的實作，這裡只是整合進來，commit 保留他的署名。
+後來也已合併進 [Aurora Silicon 的 kernel](https://github.com/aurora-silicon/linux/pull/24)；
+使用者端工具見 [omdrop-awdl](https://github.com/brentkearney/omdrop-awdl)
+與 [omdrop-plugin](https://github.com/brentkearney/omdrop-plugin)。
+
 ---
 
 ## 還沒做到的
@@ -155,7 +160,7 @@ one, you may carry the line above.
 這份工作站在很多人的肩膀上：
 
 - **[Asahi Linux](https://asahilinux.org/)** — 整個 Apple Silicon 的 Linux 移植
-- **Brent Kearney（aurora-linux）** — PCIe-C 隧道的原始實作
+- **Brent Kearney（aurora-linux）** — PCIe-C 隧道的原始實作，以及 brcmfmac 的 AWDL / AirDrop 支援
 - **Sven Peter**、**Janne Grunau** — Apple Silicon 的 PCIe、DART、DCP、裝置樹
 
 他們的 commit 都保留原作者署名。
