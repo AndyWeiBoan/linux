@@ -127,9 +127,26 @@ make ARCH=arm64 -j$(nproc) Image.gz modules
 
 ### 如果你想把這些東西送上游
 
-那你得**重新獨立產出**，不能直接拿這裡的 patch。
-不過裡面的發現（macOS 的隧道連結訓練順序、Studio Display 的亮度走 IOMFB
+- **不接受 AI 協助貢獻的專案**（例如 Asahi Linux）：你得**重新獨立產出**，
+  不能直接拿這裡的 patch。
+- **接受 AI 協助貢獻的專案**（例如 [Aurora Silicon](https://github.com/aurora-silicon/linux)）：
+  可以直接移植這裡的 patch，請保留原 commit 連結。
+
+不論哪一種，裡面的發現（macOS 的隧道連結訓練順序、Studio Display 的亮度走 IOMFB
 而非 HID、顯示 CRTC 的釋放時機等）是硬體事實，那部分可以自由參考。
+
+### Signed-off-by
+
+這個 fork 裡我寫的 commit，我都依
+[Developer Certificate of Origin 1.1](https://developercertificate.org/) 提供，
+移植時可以附上：
+
+```
+Signed-off-by: Andy Wei <andyweiboan@gmail.com>
+```
+
+All commits I authored in this fork are offered under the DCO 1.1; when porting
+one, you may carry the line above.
 
 ---
 
